@@ -18,6 +18,33 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.31.3] - 2026-08-19
+
+### Fixed
+
+- **A window resized once could not be resized again.** The minimum-size
+  learning added in 0.31.0 fired on the *first* missed placement, and the first
+  miss after a drag is guaranteed: the window is still at the size it was just
+  dragged to, anchored at the same origin, so the request looks exactly like a
+  refusal. Chrome dragged to 1323px tall was immediately recorded as having a
+  1323px minimum and given that height from then on, which wrecked the layout on
+  the next drag.
+
+  A refusal is only established after three misses spread over at least two
+  seconds — a window that has seen the request and declined it. Learning now
+  happens there, at the point the window is written off, rather than at the
+  first sign of disagreement.
+
+  This is the same fault as 0.16.4, which was reverted for freezing GIMP. The
+  anchor test added afterwards was necessary but not sufficient: it tells a
+  clamp from an ignored move, and says nothing about whether the window has had
+  a chance to respond.
+
+- **A drag now discards whatever was learned about that window.** The user
+  stating a size outranks anything inferred from the window's past, and the
+  inference may itself have come from a size this very window was previously
+  dragged to.
+
 ## [0.31.2] - 2026-08-19
 
 ### Added

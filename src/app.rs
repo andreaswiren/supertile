@@ -1073,26 +1073,6 @@ impl App {
                 if self.unmanageable.contains_key(&w.hwnd) {
                     continue;
                 }
-                // Learn what the window will actually accept, when it has
-                // clearly declined rather than merely landed askew: one edge
-                // where it was asked, the other pushed out. See
-                // `layout::learned_minimum` for why the anchor test matters.
-                let (lw, lh) = layout::learned_minimum(want, w.rect, REFUSAL_TOLERANCE);
-                if lw.is_some() || lh.is_some() {
-                    let seen = self.observed_mins.entry(w.hwnd).or_insert((0, 0));
-                    let before = *seen;
-                    seen.0 = seen.0.max(lw.unwrap_or(0));
-                    seen.1 = seen.1.max(lh.unwrap_or(0));
-                    if *seen != before {
-                        crate::log!(
-                            "'{}' will not go below {}x{}; asking for that from now on",
-                            w.title,
-                            seen.0,
-                            seen.1
-                        );
-                    }
-                }
-
                 let missed = (w.rect.left - want.left).abs() > REFUSAL_TOLERANCE
                     || (w.rect.top - want.top).abs() > REFUSAL_TOLERANCE
                     || (w.rect.right - want.right).abs() > REFUSAL_TOLERANCE
@@ -1180,6 +1160,33 @@ impl App {
                     w.rect.top
                 );
                 if n >= MAX_PLACEMENT_MISSES {
+                    // Only now is a refusal established, and only now is it
+                    // safe to learn from.
+                    //
+                    // Reading it from the first miss was wrong in the one case
+                    // that matters: straight after a drag the window is at the
+                    // size the user left it, anchored at the same origin, so
+                    // the first request always looks like a refusal. Chrome was
+                    // dragged to 1323 tall and immediately recorded as having a
+                    // 1323px minimum, which then dictated its cell for good.
+                    //
+                    // Three misses spread over at least two seconds is a window
+                    // that has seen the request and declined it.
+                    let (lw, lh) = layout::learned_minimum(want, w.rect, REFUSAL_TOLERANCE);
+                    if lw.is_some() || lh.is_some() {
+                        let seen = self.observed_mins.entry(w.hwnd).or_insert((0, 0));
+                        let before = *seen;
+                        seen.0 = seen.0.max(lw.unwrap_or(0));
+                        seen.1 = seen.1.max(lh.unwrap_or(0));
+                        if *seen != before {
+                            crate::log!(
+                                "'{}' will not accept less than {}x{}; asking for that from now on",
+                                w.title,
+                                seen.0,
+                                seen.1
+                            );
+                        }
+                    }
                     crate::log!(
                         "'{}' ({}) will not accept a size -- asked for {}x{}, it stayed {}x{}; pausing for {}s",
                         w.title,
@@ -1380,6 +1387,14 @@ impl App {
                 return;
             }
         };
+
+        // A drag is the user stating what they want, which outranks anything
+        // inferred from a window's past behaviour. Whatever minimum was
+        // observed may also have been learned from a size this very window was
+        // dragged to, so carrying it into the next drag compounds the error.
+        self.observed_mins.remove(&key);
+        self.misses.remove(&key);
+        self.unmanageable.remove(&key);
 
         self.drag = Some(DragSession {
             hwnd: key,
