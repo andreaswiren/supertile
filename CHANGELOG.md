@@ -18,6 +18,17 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.30.1] - 2026-08-19
+
+### Added
+
+- Every reason a drag can be refused is now recorded: paused, one of our own
+  windows, no known monitor, or not present in the layout — along with the
+  layout key in use and how many windows are in it. A drag that silently never
+  starts is indistinguishable from one that starts and then does nothing, and
+  those have entirely different causes; the log could not previously tell them
+  apart.
+
 ## [0.30.0] - 2026-08-19
 
 ### Added

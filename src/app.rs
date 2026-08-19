@@ -1301,12 +1301,23 @@ impl App {
         }
         let key = hwnd.0 as isize;
         if self.config.general.paused || self.own_windows().contains(&key) {
+            crate::vlog!("drag declined: paused, or one of our own windows");
             return;
         }
         let Some(m) = crate::monitor::from_window(hwnd) else {
+            crate::vlog!("drag declined: the window is on no known monitor");
             return;
         };
         let (order, zones) = self.zones_of(&m);
+        // Every reason this can refuse, said out loud. A drag that silently
+        // does not start is indistinguishable from one that starts and does
+        // nothing, and those have entirely different causes.
+        crate::vlog!(
+            "drag requested for '{}': layout key {}, {} window(s) in that layout",
+            crate::window::title_of(hwnd),
+            self.layout_key(&m.device),
+            order.len()
+        );
         // A detached window has no cell, but it must still be draggable --
         // otherwise Shift is a one-way door. Without a session there is no
         // end_drag, and the drag that was meant to put it back never happens.
@@ -1315,7 +1326,10 @@ impl App {
             Some(i) => (i, zones.get(i).copied().unwrap_or_default()),
             None if detached => (0, crate::window::visible_frame(hwnd)),
             // Genuinely nothing to do with us: an ignored window.
-            None => return,
+            None => {
+                crate::vlog!("drag declined: not in this layout and not detached");
+                return;
+            }
         };
 
         self.drag = Some(DragSession {
