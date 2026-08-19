@@ -60,26 +60,42 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Sorting by SemVer rather than by date: releases can be published out
-          # of order, and "older" has to mean a lower version, not an earlier
-          # upload.
-          if ! gh release view "$KEEP" >/dev/null 2>&1; then
-            echo "::error::No release named $KEEP. Nothing done."
+          # Addressed by release ID, not by tag.
+          #
+          # `gh release delete` takes a tag name and resolves it. A release
+          # whose tag has been deleted has no name left to resolve, so every
+          # such release refuses to delete -- which is most of them here, since
+          # deleting the tags first is exactly what orphaned them. The REST API
+          # lists releases with their own IDs and deletes by ID, which works
+          # whether or not a tag survives.
+          repo="${GITHUB_REPOSITORY}"
+
+          # id<TAB>tag, one release per line, drafts included.
+          mapfile -t rows < <(
+            gh api "repos/$repo/releases" --paginate --jq '.[] | [.id, .tag_name] | @tsv'
+          )
+          echo "Found ${#rows[@]} release(s); keeping $KEEP and anything newer."
+
+          keep_seen=0
+          for row in "${rows[@]}"; do
+            [ "$(cut -f2 <<<"$row")" = "$KEEP" ] && keep_seen=1
+          done
+          if [ "$keep_seen" -eq 0 ]; then
+            echo "::error::No release tagged $KEEP. Nothing done."
             exit 1
           fi
-
-          mapfile -t all < <(gh release list --limit 500 --json tagName --jq '.[].tagName')
-          echo "Found ${#all[@]} release(s); keeping $KEEP and anything newer."
 
           # `sort -V` orders versions properly, so 0.9.0 sorts below 0.10.0 --
           # which a lexical sort gets backwards, and which is exactly the
           # mistake that would delete the wrong thing.
           doomed=()
-          for tag in "${all[@]}"; do
+          for row in "${rows[@]}"; do
+            id=$(cut -f1 <<<"$row")
+            tag=$(cut -f2 <<<"$row")
             [ "$tag" = "$KEEP" ] && continue
-            older=$(printf '%s\n%s\n' "${tag#v}" "${KEEP#v}" | sort -V | head -1)
+            older=$( { echo "${tag#v}"; echo "${KEEP#v}"; } | sort -V | head -1 )
             if [ "$older" = "${tag#v}" ]; then
-              doomed+=("$tag")
+              doomed+=("$id|$tag")
             fi
           done
 
@@ -88,33 +104,41 @@ jobs:
             exit 0
           fi
 
-          printf 'Would delete:\n'
-          printf '  %s\n' "${doomed[@]}"
+          echo "Would delete:"
+          for row in "${doomed[@]}"; do
+            echo "  ${row#*|}  (id ${row%%|*})"
+          done
 
           if [ "$DRY" = "true" ]; then
             echo "Dry run: nothing was deleted. Re-run with dry_run off and confirm=DELETE."
             exit 0
           fi
 
-          # One failure must not abort the rest. `--cleanup-tag` errors when the
-          # tag is already gone -- which it often is, since deleting a tag by
-          # hand turns its release into an orphaned draft -- and under `set -e`
-          # that would stop the loop halfway and leave the job half done with no
-          # obvious record of where it stopped.
+          # One failure must not abort the rest, and the reason must be visible:
+          # an earlier version swallowed stderr and reported only that something
+          # had gone wrong, which cost a round trip to discover what.
           failed=0
-          for tag in "${doomed[@]}"; do
-            if [ "$DEL_TAGS" = "true" ] && gh release delete "$tag" --yes --cleanup-tag 2>/dev/null; then
-              echo "deleted release and tag $tag"
-            elif gh release delete "$tag" --yes 2>/dev/null; then
-              echo "deleted release $tag (tag absent or kept)"
+          for row in "${doomed[@]}"; do
+            id="${row%%|*}"
+            tag="${row#*|}"
+            if err=$(gh api -X DELETE "repos/$repo/releases/$id" 2>&1); then
+              echo "deleted release $tag (id $id)"
             else
-              echo "::warning::could not delete $tag"
+              echo "::warning::could not delete $tag (id $id): $err"
               failed=$((failed + 1))
+              continue
+            fi
+            if [ "$DEL_TAGS" = "true" ]; then
+              # A 404 here is the normal case: the tag is usually already gone,
+              # which is why the release was unaddressable by name at all.
+              if gh api -X DELETE "repos/$repo/git/refs/tags/$tag" >/dev/null 2>&1; then
+                echo "  ...and its tag"
+              fi
             fi
           done
 
           echo "Kept: $KEEP"
           if [ "$failed" -gt 0 ]; then
-            echo "::error::$failed release(s) could not be deleted; re-run to retry them."
+            echo "::error::$failed release(s) could not be deleted; each warning above says why."
             exit 1
           fi

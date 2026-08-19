@@ -18,6 +18,27 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.28.4] - 2026-08-18
+
+### Fixed
+
+- **The prune workflow could not delete 34 of the 35 releases it was asked to.**
+  `gh release delete` takes a *tag name* and resolves it. A release whose tag has
+  been deleted has no name left to resolve — and that was nearly all of them,
+  because deleting the tags first is precisely what orphaned the releases. Only
+  `v0.28.1`, which still had its tag, went.
+
+  Releases are now enumerated and deleted through the REST API by their own
+  numeric ID, which works whether or not a tag survives. Tag cleanup is a
+  separate call afterwards, and a 404 there is treated as the expected case
+  rather than a failure.
+
+- **The failure said nothing useful.** The previous version sent `gh`'s stderr to
+  `/dev/null` and reported only that something had gone wrong, so 34 identical
+  warnings gave no clue as to why. The reason is now printed with each warning.
+  Suppressing the error output of an operation that can fail is a false economy:
+  it buys tidy logs at the cost of the one thing needed when it does fail.
+
 ## [0.28.3] - 2026-08-18
 
 ### Fixed
