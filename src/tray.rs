@@ -172,7 +172,7 @@ pub enum MenuCommand {
     EditConfigFile,
     /// Open the keyboard shortcut list and editor.
     ShowHotkeyEditor,
-    /// Offer Claude Desktop as a palette source, or stop offering it.
+    /// Offer "Ask Claude" in the palette, or stop offering it.
     ToggleClaudeSource,
     /// Turn focus dimming on or off.
     ToggleDimming,
@@ -392,8 +392,6 @@ pub struct MenuState {
     pub overlay_theme: String,
     /// The custom theme's name, for the menu.
     pub custom_theme_name: String,
-    /// Claude Desktop is installed, so the palette source can be offered.
-    pub claude_available: bool,
     /// Whether that source is currently switched on.
     pub claude_enabled: bool,
 }
@@ -1236,23 +1234,23 @@ impl Tray {
                 let _ = CheckMenuItem(settings_menu, ID_PAUSE, MF_CHECKED.0);
             }
 
-            // Only shown when Claude Desktop is actually installed: a toggle
-            // for something absent is noise.
-            if state.claude_available {
-                self.toggle_item(
-                    settings_menu,
-                    ID_CLAUDE_SOURCE,
-                    "Claude in command palette",
-                    state.claude_enabled,
-                    None,
-                    state,
-                );
-                self.describe(
-                    ID_CLAUDE_SOURCE,
-                    "Claude in command palette",
-                    "Adds a \"New chat in Claude\" entry that opens Claude Desktop",
-                );
-            }
+            // Always offered. It used to be hidden unless Claude Desktop was
+            // installed, which was right when the question went to the desktop
+            // client; it goes to claude.ai in a browser now, so there is
+            // nothing to be absent.
+            self.toggle_item(
+                settings_menu,
+                ID_CLAUDE_SOURCE,
+                "Claude in command palette",
+                state.claude_enabled,
+                None,
+                state,
+            );
+            self.describe(
+                ID_CLAUDE_SOURCE,
+                "Claude in command palette",
+                "Press Tab in the palette to ask a question. Opens claude.ai in your browser with it typed in, ready for you to send",
+            );
 
             let _ = AppendMenuW(settings_menu, MF_SEPARATOR, 0, PCWSTR::null());
 

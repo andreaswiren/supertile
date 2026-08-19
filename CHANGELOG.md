@@ -18,6 +18,26 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.28.2] - 2026-08-18
+
+### Fixed
+
+- **The Claude palette toggle still described the desktop client.** Its tooltip
+  said the entry "opens Claude Desktop", which stopped being true in 0.28.0 when
+  the question started going to claude.ai in a browser. It now says what
+  happens: Tab in the palette, and the question opens in your browser already
+  typed in, ready for you to send.
+
+- **The same toggle was hidden unless Claude Desktop was installed.** That gate
+  was right when the question went to the desktop client and wrong the moment it
+  did not — the feature needs nothing installed, so hiding it meant anyone
+  without the desktop app could not find a setting that would have worked
+  perfectly. It is always offered now, and the user's own choice is the only
+  thing that gates it.
+
+- Remaining desktop-era wording in the tray and palette source, left behind by
+  the same change.
+
 ## [0.28.1] - 2026-08-18
 
 ### Added

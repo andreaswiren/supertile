@@ -64,7 +64,7 @@ pub enum Command {
     GrowMaster,
     ShrinkMaster,
     ResetSizes,
-    /// Open a new conversation in Claude Desktop.
+    /// Ask Claude a question, in the browser.
     NewClaudeChat,
     Exit,
 }
@@ -306,7 +306,7 @@ impl Palette {
             state: RefCell::new(State {
                 mode: Mode::Search,
                 // Set when the item list is built, which is when the caller
-                // knows whether Claude Desktop is installed and enabled.
+                // knows whether the user has enabled the feature.
                 claude_available: false,
                 accepted_query: String::new(),
                 items: Vec::new(),
@@ -1044,9 +1044,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     // It used to move the selection, which the arrow keys and
                     // Page Up/Down already do -- so the mode switch costs
                     // nothing, and Tab is where a reader looks for "the other
-                    // thing this box does". When Claude Desktop is not
-                    // installed there is no other thing, and Tab keeps its old
-                    // meaning rather than doing nothing at all.
+                    // thing this box does". When the feature is switched off
+                    // there is no other thing, and Tab keeps its old meaning
+                    // rather than doing nothing at all.
                     let switched = p
                         .state
                         .try_borrow_mut()
@@ -1197,7 +1197,7 @@ mod tests {
         assert!(st.toggle_mode());
         assert_eq!(st.mode, Mode::Search);
 
-        // Without Claude Desktop the mode leads nowhere, so Tab keeps its old
+        // With the feature off the mode leads nowhere, so Tab keeps its old
         // meaning rather than switching into a dead end.
         st.claude_available = false;
         assert!(!st.toggle_mode());

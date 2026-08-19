@@ -2685,7 +2685,7 @@ impl App {
             items.push(Item::new(label, hint, Kind::Command, PA::Command(cmd)).with_keywords(kw));
         }
 
-        // Claude Desktop, when it is actually installed and not switched off.
+        // Asking goes to the browser, so only the user's own choice gates it.
         // Placed above the layouts so a bare "cl" reaches it quickly.
         // Asking goes to claude.ai in the browser, so nothing needs to be
         // installed -- only the user's consent to the feature existing.
@@ -2956,7 +2956,6 @@ impl App {
             // menu claiming something untrue.
             start_with_windows: crate::autostart::is_enabled(),
             auto_tile: self.config.general.auto_tile,
-            claude_available: crate::claude::is_installed(),
             claude_enabled: self.config.palette.claude_desktop,
         };
         let cmd = self.tray.show_menu(&state, pt);
