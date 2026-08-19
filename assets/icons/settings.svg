@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" role="img" aria-label="Settings">
+<title>Settings</title>
+<path d="M 21.30 10.61 L 21.30 13.39 L 19.18 13.79 L 18.34 15.81 L 19.56 17.59 L 17.59 19.56 L 15.81 18.34 L 13.79 19.18 L 13.39 21.30 L 10.61 21.30 L 10.21 19.18 L 8.19 18.34 L 6.41 19.56 L 4.44 17.59 L 5.66 15.81 L 4.82 13.79 L 2.70 13.39 L 2.70 10.61 L 4.82 10.21 L 5.66 8.19 L 4.44 6.41 L 6.41 4.44 L 8.19 5.66 L 10.21 4.82 L 10.61 2.70 L 13.39 2.70 L 13.79 4.82 L 15.81 5.66 L 17.59 4.44 L 19.56 6.41 L 18.34 8.19 L 19.18 10.21 Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+<circle cx="12" cy="12" r="3.3" fill="none" stroke="currentColor" stroke-width="1.75"/>
+</svg>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" role="img" aria-label="Grid layout">
+<title>Grid layout</title>
+<rect x="3" y="3" width="8" height="8" rx="1.3" fill="currentColor"/>
+<rect x="13" y="3" width="8" height="8" rx="1.3" fill="currentColor"/>
+<rect x="3" y="13" width="8" height="8" rx="1.3" fill="currentColor"/>
+<rect x="13" y="13" width="8" height="8" rx="1.3" fill="currentColor"/>
+</svg>

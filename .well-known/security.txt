@@ -1,0 +1,10 @@
+# SuperTile security contact information (RFC 9116)
+# https://github.com/andreaswiren/supertile
+
+Contact: https://github.com/andreaswiren/supertile/security/advisories/new
+Contact: mailto:andreas.wiren@gmail.com
+Expires: 2027-08-18T00:00:00.000Z
+Preferred-Languages: en, sv
+Canonical: https://raw.githubusercontent.com/andreaswiren/supertile/main/.well-known/security.txt
+Policy: https://github.com/andreaswiren/supertile/blob/main/SECURITY.md
+Acknowledgments: https://github.com/andreaswiren/supertile/blob/main/CHANGELOG.md

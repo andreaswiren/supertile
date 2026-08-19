@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Daily. A vulnerability advisory published against an unchanged dependency
+    # would never be seen by push-triggered scanning, which is exactly the case
+    # CRA Annex I Part I (1) cares about.
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  build:
+    name: Build, test and lint
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Tests
+        run: cargo test --all-features
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Report binary size
+        shell: pwsh
+        run: |
+          $f = Get-Item target/release/supertile.exe
+          "Binary: {0:N0} bytes ({1:N2} MB)" -f $f.Length, ($f.Length / 1MB)
+          Get-FileHash $f -Algorithm SHA256 | Format-List
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: supertile-exe
+          path: target/release/supertile.exe
+
+  unsafe-audit:
+    name: Every unsafe block is justified
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Require a SAFETY comment above every unsafe block
+        shell: bash
+        run: |
+          # The rule from docs/compliance/EU-CRA.md: unsafe is confined to FFI,
+          # and each block states the invariant it relies on. A reviewer cannot
+          # check an invariant that was never written down.
+          python3 scripts/check-unsafe.py
+
+  version:
+    name: Version, changelog and tag agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # tags, so the check can see what is released
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cargo.toml, CHANGELOG.md and history agree
+        run: python scripts/version.py --check
+
+  sbom:
+    name: SBOM is current
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Committed SBOM matches Cargo.lock
+        run: python scripts/make-sbom.py --check
+
+  icons:
+    name: Icons match their SVG source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet Pillow
+      - name: Geometry has not drifted from assets/icons/supertile.svg
+        run: python scripts/make-icons.py
+
+  supply-chain:
+    name: Advisories, licences and bans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources

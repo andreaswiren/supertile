@@ -1,0 +1,104 @@
+# Publish a binary for every version tag.
+#
+# The CI workflow proves a commit is sound; this one turns a tag into something
+# a person can download and run. It deliberately rebuilds from the tag rather
+# than reusing a CI artefact, so what ships is built from exactly the source the
+# tag names and nothing else.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  # Re-runnable by hand, so a tag whose first attempt failed can be published
+  # without inventing a new version number to carry the retry.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish, e.g. v0.16.1"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      # A release that fails its own tests is not a release. This duplicates
+      # the CI workflow on purpose: a tag can be pushed to a commit CI never
+      # ran on, and finding that out after publishing is too late.
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: Check the version agrees with the tag
+        run: python scripts/version.py --check
+
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      # Shipped beside the binary because the CRA expects an SBOM to accompany
+      # the product, not merely to exist in a repository.
+      # Advisory, not a gate. The SBOM committed to the repository is what
+      # ships either way; this only reports whether regenerating it here
+      # produces the same document. A difference in the toolchain's own
+      # metadata must not be able to block a release that is otherwise sound.
+      - name: Verify the SBOM matches the source
+        continue-on-error: true
+        run: |
+          cargo install cargo-cyclonedx --locked
+          python scripts/make-sbom.py --check
+
+      - name: Stage the release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/supertile.exe dist/
+          Copy-Item docs/compliance/sbom.cdx.json dist/supertile.cdx.json
+          Copy-Item README.md, CHANGELOG.md, LICENSE dist/ -ErrorAction SilentlyContinue
+          # A checksum is the only way a downloader can tell our binary from
+          # someone else's, since these builds are not code-signed.
+          $h = Get-FileHash dist/supertile.exe -Algorithm SHA256
+          "$($h.Hash.ToLower())  supertile.exe" |
+            Set-Content dist/supertile.exe.sha256 -Encoding ascii
+          Get-Content dist/supertile.exe.sha256
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            dist/supertile.exe
+            dist/supertile.exe.sha256
+            dist/supertile.cdx.json
+          body: |
+            Download `supertile.exe` and run it — no installer, no dependencies.
+            It lives in the system tray.
+
+            **These builds are not code-signed**, so SmartScreen will warn on
+            first run. Verify the download against `supertile.exe.sha256`
+            before trusting it:
+
+            ```powershell
+            Get-FileHash supertile.exe -Algorithm SHA256
+            ```
+
+            `supertile.cdx.json` is the CycloneDX software bill of materials for
+            this exact build, as required under the EU Cyber Resilience Act. The
+            same document is readable in the app under **About & SBOM**.
+
+            See [CHANGELOG.md](https://github.com/andreaswiren/supertile/blob/main/CHANGELOG.md)
+            for what changed in this version.
+          generate_release_notes: true
+          fail_on_unmatched_files: true

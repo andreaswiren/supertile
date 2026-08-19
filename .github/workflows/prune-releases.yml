@@ -1,0 +1,109 @@
+# Remove old GitHub Releases, keeping one.
+#
+# Run from Actions → Prune releases → Run workflow. It deletes release entries
+# and, optionally, the tags behind them. Both are irreversible from the UI, so
+# the workflow is built to make an accident hard rather than to be quick:
+#
+#   * It does nothing unless `confirm` is typed exactly as `DELETE`.
+#   * `dry_run` defaults to true, so the first run always reports and stops.
+#   * The release named in `keep` is never touched, and neither is anything
+#     newer than it.
+#
+# The binary attached to a deleted release goes with it. Anyone holding a link
+# to one will get a 404, which is the point, but it is worth knowing before
+# rather than after.
+name: Prune releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: "Tag to keep, e.g. v0.28.1. This one and anything newer survive."
+        required: true
+      delete_tags:
+        description: "Also delete the git tags, not just the release entries"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Report what would be deleted and stop"
+        type: boolean
+        default: true
+      confirm:
+        description: 'Type DELETE to confirm. Ignored when dry_run is on.'
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse an unconfirmed deletion
+        if: ${{ inputs.dry_run == false && inputs.confirm != 'DELETE' }}
+        run: |
+          echo "::error::Set dry_run, or type DELETE in confirm. Neither was done."
+          exit 1
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: ${{ inputs.keep }}
+          DRY: ${{ inputs.dry_run }}
+          DEL_TAGS: ${{ inputs.delete_tags }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Sorting by SemVer rather than by date: releases can be published out
+          # of order, and "older" has to mean a lower version, not an earlier
+          # upload.
+          if ! gh release view "$KEEP" >/dev/null 2>&1; then
+            echo "::error::No release named $KEEP. Nothing done."
+            exit 1
+          fi
+
+          mapfile -t all < <(gh release list --limit 500 --json tagName --jq '.[].tagName')
+          echo "Found ${#all[@]} release(s); keeping $KEEP and anything newer."
+
+          # `sort -V` orders versions properly, so 0.9.0 sorts below 0.10.0 --
+          # which a lexical sort gets backwards, and which is exactly the
+          # mistake that would delete the wrong thing.
+          doomed=()
+          for tag in "${all[@]}"; do
+            [ "$tag" = "$KEEP" ] && continue
+            older=$(printf '%s\n%s\n' "${tag#v}" "${KEEP#v}" | sort -V | head -1)
+            if [ "$older" = "${tag#v}" ]; then
+              doomed+=("$tag")
+            fi
+          done
+
+          if [ ${#doomed[@]} -eq 0 ]; then
+            echo "Nothing older than $KEEP. Done."
+            exit 0
+          fi
+
+          printf 'Would delete:\n'
+          printf '  %s\n' "${doomed[@]}"
+
+          if [ "$DRY" = "true" ]; then
+            echo "Dry run: nothing was deleted. Re-run with dry_run off and confirm=DELETE."
+            exit 0
+          fi
+
+          for tag in "${doomed[@]}"; do
+            if [ "$DEL_TAGS" = "true" ]; then
+              gh release delete "$tag" --yes --cleanup-tag
+              echo "deleted release and tag $tag"
+            else
+              gh release delete "$tag" --yes
+              echo "deleted release $tag (tag kept)"
+            fi
+          done
+
+          echo "Kept: $KEEP"

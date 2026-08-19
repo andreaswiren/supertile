@@ -1,0 +1,53 @@
+# cargo-deny: supply-chain policy, enforced in CI.
+# Referenced by docs/compliance/EU-CRA.md Annex I Part I (1).
+
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+all-features = true
+
+[advisories]
+# Any advisory against anything we link fails the build. The daily CI schedule
+# matters as much as this setting: an advisory published against unchanged code
+# would never be seen by push-triggered scanning alone.
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licences only. Copyleft would change the terms under which
+# SuperTile itself can be distributed, which is a decision, not an accident.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# A window manager has no business pulling in a network stack. If one of these
+# ever appears in the tree, the "no network access" claim in the CRA notes and
+# the threat model has silently become false.
+deny = [
+    { name = "reqwest" },
+    { name = "hyper" },
+    { name = "curl" },
+    { name = "ureq" },
+    { name = "tokio" },
+    { name = "async-std" },
+    { name = "openssl" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

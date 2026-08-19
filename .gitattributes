@@ -1,0 +1,21 @@
+# Normalise line endings so the repo is stable across Windows and CI runners.
+* text=auto eol=lf
+
+# Windows-native files that must keep CRLF.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+*.rc   text eol=crlf
+
+# Binary assets — never diff, never normalise.
+*.ico  binary
+*.png  binary
+*.exe  binary
+*.dll  binary
+
+# Generated: collapse in review, but still diffable when needed.
+Cargo.lock                    linguist-generated=true
+docs/compliance/sbom.cdx.json linguist-generated=true
+
+# Language stats should reflect the actual source.
+docs/** linguist-documentation=true
