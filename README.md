@@ -28,6 +28,7 @@ core while running.
 | **Geometry memory** | Remembers the zone each executable was last given, per display arrangement, and restores it next launch. |
 | **Command palette** | Fuzzy launcher over installed apps, open windows and every SuperTile command. Tab switches to asking Claude a question, opt-in. |
 | **Multi-monitor, per-monitor DPI** | Work areas, gaps and zones computed per monitor at that monitor's DPI. |
+| **Virtual desktops** | Each desktop keeps its own layout on each monitor; arranging one does not disturb another. |
 | **Overlay themes** | Twelve of them, plus an editor with a live preview, for the outlines drawn while you drag. |
 | **Issue reports** | One click assembles your machine's shape as Markdown, with window titles, paths and your user name left out. |
 

@@ -1456,3 +1456,52 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Virtual desktops
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// The shell's virtual-desktop manager, created once per thread.
+    ///
+    /// `IVirtualDesktopManager` is the *public* interface, documented in
+    /// `shobjidl_core.h` and stable since Windows 10. It answers two questions
+    /// and no more: which desktop a window is on, and whether that is the
+    /// current one. The interface that enumerates or switches desktops is a
+    /// different, undocumented one which shifts between Windows builds and is
+    /// deliberately not used here.
+    static VDM: std::cell::RefCell<Option<windows::Win32::UI::Shell::IVirtualDesktopManager>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Identifier of the virtual desktop a window sits on.
+///
+/// `None` when the shell will not say — an elevated window, a window that has
+/// just been created, or a Windows build without the interface. Callers must
+/// treat that as "unknown desktop" rather than as a particular one, or two
+/// unknowns would be grouped together as though they were the same place.
+pub fn desktop_id(hwnd: HWND) -> Option<String> {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
+
+    VDM.with(|cell| {
+        let mut slot = cell.try_borrow_mut().ok()?;
+        if slot.is_none() {
+            // SAFETY: initialising COM for this thread. A repeat call returns
+            // RPC_E_CHANGED_MODE or S_FALSE, both of which are fine to ignore:
+            // the apartment is already there, which is all this needs.
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            }
+            // SAFETY: standard COM activation of a shell-provided class.
+            *slot = unsafe { CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_ALL).ok() };
+        }
+        let vdm: &IVirtualDesktopManager = slot.as_ref()?;
+        // SAFETY: `vdm` is a live interface pointer; the GUID is an out-param.
+        let guid = unsafe { vdm.GetWindowDesktopId(hwnd) }.ok()?;
+        // All-zero means the shell does not know, which is not an identity.
+        (guid != windows::core::GUID::zeroed()).then(|| format!("{guid:?}"))
+    })
+}

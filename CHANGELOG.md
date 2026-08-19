@@ -18,6 +18,33 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.30.0] - 2026-08-19
+
+### Added
+
+- **Virtual desktops are now understood**, and I was wrong to say they could not
+  be. The *public* `IVirtualDesktopManager` is documented and stable since
+  Windows 10; only the interface that enumerates and switches desktops is
+  undocumented, and that one is not needed. Asking which desktop a window is on
+  is entirely supported, and that is the whole requirement.
+
+### Fixed
+
+- **Working on a second virtual desktop wrecked the layout on the first.** A
+  monitor keeps its name across a desktop switch while every window on it is
+  replaced, and layouts were stored per monitor — so the windows on desktop two
+  were fitted into desktop one's tree, and the tree they reshaped by being
+  resized was the one desktop one came back to.
+
+  Layouts are keyed by desktop and monitor together now, so each desktop keeps
+  its own arrangement and neither can disturb the other. Where the shell will
+  not name the desktop — an elevated window, or a Windows build without the
+  interface — the monitor alone is used, which is the previous behaviour and no
+  worse than it was.
+
+  A drag holds the key it started with, so a desktop switch mid-gesture cannot
+  redirect it onto another desktop's layout.
+
 ## [0.29.0] - 2026-08-19
 
 ### Fixed

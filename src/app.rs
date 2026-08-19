@@ -276,6 +276,8 @@ pub struct App {
     theme_editor: Box<crate::ui::theme_editor::ThemeEditor>,
     /// A newer release found by a check, for the About window to offer.
     pending_update: Option<(String, String)>,
+    /// The virtual desktop the last retile saw, part of every layout key.
+    current_desktop: Option<String>,
     /// Windows we are not permitted to move, because they are elevated.
     ///
     /// Kept apart from `unmanageable`: that means "this window declines the
@@ -314,8 +316,13 @@ pub struct App {
 /// A move or resize the user is performing right now.
 struct DragSession {
     hwnd: isize,
-    /// Monitor the drag started on.
+    /// Monitor the drag started on, for telling monitors apart.
     device: String,
+    /// The layout key for that monitor, which also names the virtual desktop.
+    ///
+    /// Held rather than recomputed: a drag must keep operating on the layout it
+    /// began in, even if the desktop changes underneath it.
+    key: String,
     /// Slot the window occupied when the drag began.
     zone_index: usize,
     /// The zone it was sitting in, used as the reference for edge movement.
@@ -439,6 +446,7 @@ impl App {
             trees: HashMap::new(),
             keys: HashMap::new(),
             theme_editor,
+            current_desktop: None,
             pending_update: None,
             elevated: HashSet::new(),
             checked_elevation: HashSet::new(),
@@ -840,7 +848,25 @@ impl App {
             );
         }
 
-        let key = m.device.clone();
+        // Keyed by virtual desktop as well as monitor.
+        //
+        // Switching desktops replaces every window on the screen while the
+        // monitor keeps its name, so one key per monitor meant desktop two's
+        // windows were fitted into desktop one's tree -- and the tree they
+        // reshaped was the one desktop one came back to. Resizing anything on
+        // the second desktop wrecked the first.
+        //
+        // The desktop of the first live window stands for all of them: they are
+        // on screen, and only the current desktop's windows are. When the shell
+        // will not say, the monitor alone is the key, which is the old
+        // behaviour and no worse than it was.
+        if let Some(d) = live
+            .first()
+            .and_then(|w| crate::window::desktop_id(w.handle()))
+        {
+            self.current_desktop = Some(d);
+        }
+        let key = self.layout_key(&m.device);
         let params = self.config.layout.params();
         let kind = self.config.layout.kind;
 
@@ -1230,7 +1256,7 @@ impl App {
     fn zones_of(&self, m: &Monitor) -> (Vec<isize>, Vec<Rect>) {
         let order = self
             .orders
-            .get(&m.device)
+            .get(&self.layout_key(&m.device))
             .map(|o| o.order.clone())
             .unwrap_or_default();
         if order.is_empty() {
@@ -1240,7 +1266,7 @@ impl App {
         let params = self.config.layout.params();
 
         if kind == LayoutKind::Bsp {
-            if let Some(tree) = self.trees.get(&m.device) {
+            if let Some(tree) = self.trees.get(&self.layout_key(&m.device)) {
                 let placed = tree.layout(m.work_area);
                 if !placed.is_empty() {
                     let inner = params.inner_gap / 2;
@@ -1259,7 +1285,7 @@ impl App {
             order.len(),
             kind,
             &params,
-            self.splits_for(&m.device, kind),
+            self.splits_for(&self.layout_key(&m.device), kind),
         );
         (order, zones)
     }
@@ -1295,6 +1321,7 @@ impl App {
         self.drag = Some(DragSession {
             hwnd: key,
             device: m.device.clone(),
+            key: self.layout_key(&m.device),
             zone_index: index,
             zone,
             start: crate::window::visible_frame(hwnd),
@@ -1381,6 +1408,7 @@ impl App {
             return;
         };
         let device = session.device.clone();
+        let lkey = session.key.clone();
         let index = session.zone_index;
         let zone = session.zone;
         let dragged = session.hwnd;
@@ -1467,18 +1495,18 @@ impl App {
 
         if kind == LayoutKind::Bsp {
             let before = self.squeeze(&m);
-            let previous = self.trees.get(&device).cloned();
-            self.resize_tree(&device, dragged, zone, now, m.work_area);
+            let previous = self.trees.get(&lkey).cloned();
+            self.resize_tree(&lkey, dragged, zone, now, m.work_area);
             if self.squeeze(&m) > before {
                 // Put the boundary back and stop following the pointer. The
                 // alternative is to overrun a neighbour's minimum, and a window
                 // that has been overrun does not politely stay put.
                 match previous {
                     Some(t) => {
-                        self.trees.insert(device.clone(), t);
+                        self.trees.insert(lkey.clone(), t);
                     }
                     None => {
-                        self.trees.remove(&device);
+                        self.trees.remove(&lkey);
                     }
                 }
                 self.readout.set_warning(true);
@@ -1527,7 +1555,7 @@ impl App {
             sess.last_applied = Some((lead.axis, lead.index, lead.fraction));
         }
 
-        let key = (device.clone(), kind);
+        let key = (lkey.clone(), kind);
         let squeeze_before = self.squeeze(&m);
         let previous = self.splits.get(&key).cloned();
 
@@ -1664,6 +1692,19 @@ impl App {
         let _ = self.config.save();
         if let Ok(dir) = crate::util::data_dir() {
             crate::ui::about::open_url(&dir.join("config.json").to_string_lossy());
+        }
+    }
+
+    /// The key a monitor's layout is stored under.
+    ///
+    /// A monitor keeps its name across a virtual-desktop switch while every
+    /// window on it is replaced, so the name alone is not an identity for a
+    /// layout. Combining it with the desktop keeps each desktop's arrangement
+    /// to itself.
+    fn layout_key(&self, device: &str) -> String {
+        match &self.current_desktop {
+            Some(d) => format!("{d}|{device}"),
+            None => device.to_string(),
         }
     }
 
@@ -1952,7 +1993,7 @@ impl App {
 
             match d.action {
                 drag::DropAction::Swap => {
-                    if let Some(order) = self.orders.get_mut(&session.device) {
+                    if let Some(order) = self.orders.get_mut(&session.key) {
                         order.swap(session.zone_index, d.target);
                     }
                     if let Some(t) = self.trees.get_mut(&session.device) {
@@ -1983,7 +2024,7 @@ impl App {
                     // anything.
                     let already_a_tree = self.config.layout.kind == LayoutKind::Bsp;
                     if !already_a_tree && !crate::window::ctrl_held() {
-                        if let Some(order) = self.orders.get_mut(&session.device) {
+                        if let Some(order) = self.orders.get_mut(&session.key) {
                             let before = d.action == drag::DropAction::InsertBefore;
                             order.move_to(
                                 session.hwnd,
@@ -2010,7 +2051,7 @@ impl App {
                     );
                     match (ratio, target_hwnd) {
                         (Some(r), Some(th)) => {
-                            self.split_onto(&session.device, session.hwnd, th, &d, r)
+                            self.split_onto(&session.key, &session.device, session.hwnd, th, &d, r)
                         }
                         (None, _) => {
                             crate::log!("refused a split: the cell cannot hold both minimum sizes")
@@ -2048,6 +2089,7 @@ impl App {
     /// silently doing nothing, which is what happened before, is worse.
     fn split_onto(
         &mut self,
+        key: &str,
         device: &str,
         moved: isize,
         target: isize,
@@ -2062,14 +2104,14 @@ impl App {
         };
         let order = self
             .orders
-            .get(device)
+            .get(key)
             .map(|o| o.order.clone())
             .unwrap_or_default();
 
         if self.config.layout.kind != LayoutKind::Bsp {
             // Seed from what is on screen now, then adopt the tree.
             let seed = crate::tree::Tree::from_windows(&order, m.work_area);
-            self.trees.insert(device.to_string(), seed);
+            self.trees.insert(key.to_string(), seed);
             self.layout_before_split = Some(self.config.layout.kind);
             self.config.layout.kind = LayoutKind::Bsp;
             let _ = self.config.save();
@@ -2182,7 +2224,7 @@ impl App {
         let Some(fg) = window::foreground() else {
             return;
         };
-        let Some(order) = self.orders.get(&m.device) else {
+        let Some(order) = self.orders.get(&self.layout_key(&m.device)) else {
             return;
         };
         let Some(from) = order.index_of(fg.0 as isize) else {
@@ -2209,7 +2251,7 @@ impl App {
             return;
         };
         let (from, to) = {
-            let Some(order) = self.orders.get(&m.device) else {
+            let Some(order) = self.orders.get(&self.layout_key(&m.device)) else {
                 return;
             };
             let Some(from) = order.index_of(fg.0 as isize) else {
@@ -2567,9 +2609,13 @@ impl App {
             .iter()
             .filter_map(|(device, tree)| {
                 let key_of = |h: isize| -> Option<String> { self.keys.get(&h).cloned() };
+                // The key is `desktop|device`, or a bare device where the
+                // shell would not name the desktop. The monitor is the last
+                // field either way; a GUID contains no pipe.
+                let dev = device.rsplit('|').next().unwrap_or(device);
                 let area = crate::monitor::enumerate()
                     .into_iter()
-                    .find(|m| &m.device == device)
+                    .find(|m| m.device == dev)
                     .map(|m| m.work_area)
                     .unwrap_or_default();
                 tree.to_saved(area, &key_of).map(|n| (device.clone(), n))
