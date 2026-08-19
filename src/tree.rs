@@ -661,8 +661,17 @@ fn split_area(area: Rect, orientation: Orientation, ratio: f32) -> (Rect, Rect) 
 /// into these proportions is a decision the user made.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SavedNode {
-    /// A window identity, e.g. `chrome.exe|Chrome_WidgetWin_1`.
-    Leaf(String),
+    /// A window identity, and the cell it occupied.
+    ///
+    /// The identity alone is not enough to tell four Chrome windows apart --
+    /// they share an executable and a class, so whichever one the pool happened
+    /// to yield first took the first Chrome-shaped cell and the rest shuffled.
+    /// The layout came back and the windows within it did not.
+    ///
+    /// Where each one *was* is the tie-breaker. Windows restores an application
+    /// roughly where it left it, so the live window nearest a saved cell is
+    /// almost always the one that used to be in it.
+    Leaf { key: String, rect: Rect },
     Split {
         orientation: Orientation,
         ratio: f32,
@@ -677,16 +686,35 @@ impl Tree {
     /// A window whose identity cannot be determined is dropped and its sibling
     /// takes the space, exactly as closing it would do. Saving a leaf that can
     /// never be matched would leave a permanent hole in the restored layout.
-    pub fn to_saved(&self, key_of: &dyn Fn(isize) -> Option<String>) -> Option<SavedNode> {
-        fn walk(node: &Node, key_of: &dyn Fn(isize) -> Option<String>) -> Option<SavedNode> {
+    pub fn to_saved(
+        &self,
+        area: Rect,
+        key_of: &dyn Fn(isize) -> Option<String>,
+    ) -> Option<SavedNode> {
+        // Each leaf's cell, so the restore can tell windows of the same kind
+        // apart by where they were.
+        let places: std::collections::HashMap<isize, Rect> = self
+            .layout(area)
+            .into_iter()
+            .map(|p| (p.hwnd, p.rect))
+            .collect();
+
+        fn walk(
+            node: &Node,
+            key_of: &dyn Fn(isize) -> Option<String>,
+            places: &std::collections::HashMap<isize, Rect>,
+        ) -> Option<SavedNode> {
             match node {
-                Node::Leaf(h) => key_of(*h).map(SavedNode::Leaf),
+                Node::Leaf(h) => key_of(*h).map(|key| SavedNode::Leaf {
+                    key,
+                    rect: places.get(h).copied().unwrap_or_default(),
+                }),
                 Node::Split {
                     orientation,
                     ratio,
                     first,
                     second,
-                } => match (walk(first, key_of), walk(second, key_of)) {
+                } => match (walk(first, key_of, places), walk(second, key_of, places)) {
                     (Some(a), Some(b)) => Some(SavedNode::Split {
                         orientation: *orientation,
                         ratio: *ratio,
@@ -700,7 +728,7 @@ impl Tree {
                 },
             }
         }
-        self.root.as_ref().and_then(|r| walk(r, key_of))
+        self.root.as_ref().and_then(|r| walk(r, key_of, &places))
     }
 
     /// Rebuild from the saved form, claiming a live window for each leaf.
@@ -713,10 +741,16 @@ impl Tree {
     /// Windows that match nothing saved are not this function's business: the
     /// caller inserts them afterwards, which puts them in the largest free
     /// space like any newly-appeared window.
-    pub fn from_saved(saved: &SavedNode, claim: &mut dyn FnMut(&str) -> Option<isize>) -> Tree {
-        fn walk(node: &SavedNode, claim: &mut dyn FnMut(&str) -> Option<isize>) -> Option<Node> {
+    pub fn from_saved(
+        saved: &SavedNode,
+        claim: &mut dyn FnMut(&str, Rect) -> Option<isize>,
+    ) -> Tree {
+        fn walk(
+            node: &SavedNode,
+            claim: &mut dyn FnMut(&str, Rect) -> Option<isize>,
+        ) -> Option<Node> {
             match node {
-                SavedNode::Leaf(key) => claim(key).map(Node::Leaf),
+                SavedNode::Leaf { key, rect } => claim(key, *rect).map(Node::Leaf),
                 SavedNode::Split {
                     orientation,
                     ratio,
@@ -1050,9 +1084,9 @@ mod tests {
         t.set_ratio(target, Orientation::Horizontal, area, 700, true);
         let before = t.layout(area);
 
-        let saved = t.to_saved(&keyed).expect("a populated tree saves");
+        let saved = t.to_saved(area, &keyed).expect("a populated tree saves");
         let mut pool: Vec<isize> = order.clone();
-        let mut back = Tree::from_saved(&saved, &mut |key| {
+        let mut back = Tree::from_saved(&saved, &mut |key, _| {
             let i = pool
                 .iter()
                 .position(|h| keyed(*h).as_deref() == Some(key))?;
@@ -1074,11 +1108,11 @@ mod tests {
         // the whole area rather than restoring gaps where the absent two were.
         let area = Rect::new(0, 0, 2400, 1200);
         let saved = Tree::from_windows(&(1..=6).collect::<Vec<isize>>(), area)
-            .to_saved(&keyed)
+            .to_saved(area, &keyed)
             .unwrap();
 
         let mut pool: Vec<isize> = vec![1, 2, 4, 6];
-        let back = Tree::from_saved(&saved, &mut |key| {
+        let back = Tree::from_saved(&saved, &mut |key, _| {
             let i = pool
                 .iter()
                 .position(|h| keyed(*h).as_deref() == Some(key))?;
@@ -1100,31 +1134,65 @@ mod tests {
         // a skeleton with no windows in it.
         let area = Rect::new(0, 0, 1000, 800);
         let saved = Tree::from_windows(&[1, 2, 3], area)
-            .to_saved(&keyed)
+            .to_saved(area, &keyed)
             .unwrap();
-        let back = Tree::from_saved(&saved, &mut |_| None);
+        let back = Tree::from_saved(&saved, &mut |_, _| None);
         assert!(back.layout(area).is_empty());
     }
 
     #[test]
-    fn two_windows_of_the_same_kind_take_their_two_cells() {
-        // Identity is per application, not per window, so a claim function
-        // hands out each live window once. Two Chrome windows must not both
-        // land in the first Chrome-shaped cell.
+    fn windows_of_the_same_kind_go_back_to_their_own_cells() {
+        // The reported fault: the shape came back but the windows within it
+        // swapped. Identity cannot separate two Chrome windows -- they share an
+        // executable and a class -- so whichever the pool yielded first took
+        // the first Chrome-shaped cell.
+        //
+        // Where each one is now decides it. Window 11 sits on the right, so it
+        // belongs in the right-hand cell however the pool is ordered.
         let area = Rect::new(0, 0, 1600, 800);
+        let left = Rect::new(0, 0, 800, 800);
+        let right = Rect::new(800, 0, 1600, 800);
         let saved = SavedNode::Split {
             orientation: Orientation::Horizontal,
             ratio: 0.5,
-            first: Box::new(SavedNode::Leaf("chrome.exe|C".into())),
-            second: Box::new(SavedNode::Leaf("chrome.exe|C".into())),
+            first: Box::new(SavedNode::Leaf {
+                key: "chrome.exe|C".into(),
+                rect: left,
+            }),
+            second: Box::new(SavedNode::Leaf {
+                key: "chrome.exe|C".into(),
+                rect: right,
+            }),
         };
-        let mut pool = vec![10isize, 11];
-        let back = Tree::from_saved(&saved, &mut |_| (!pool.is_empty()).then(|| pool.remove(0)));
+
+        // 10 is on the right of the screen, 11 on the left -- the opposite of
+        // the order the pool lists them in, so a first-come claim gets it wrong.
+        let now = [(10isize, right), (11isize, left)];
+        let mut pool: Vec<isize> = now.iter().map(|(h, _)| *h).collect();
+        let centre = |r: Rect| ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        let back = Tree::from_saved(&saved, &mut |_key, want| {
+            let (wx, wy) = centre(want);
+            let idx = pool
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, h)| {
+                    let (cx, cy) = centre(now.iter().find(|(x, _)| x == *h).unwrap().1);
+                    let (dx, dy) = ((cx - wx) as i64, (cy - wy) as i64);
+                    dx * dx + dy * dy
+                })
+                .map(|(i, _)| i)?;
+            Some(pool.remove(idx))
+        });
+
         let placed = back.layout(area);
         assert_eq!(placed.len(), 2);
-        let mut got: Vec<isize> = placed.iter().map(|p| p.hwnd).collect();
-        got.sort();
-        assert_eq!(got, vec![10, 11]);
+        let at = |x: i32| placed.iter().find(|p| p.rect.left == x).unwrap().hwnd;
+        assert_eq!(
+            at(800),
+            10,
+            "the window on the right should stay on the right"
+        );
+        assert_eq!(at(0), 11, "the window on the left should stay on the left");
     }
 
     #[test]

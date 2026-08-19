@@ -18,6 +18,38 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.29.0] - 2026-08-19
+
+### Fixed
+
+- **Windows swapped cells when a saved layout was restored.** The shape came
+  back and the windows within it did not. A saved leaf recorded only *what kind*
+  of window was there, which cannot separate four Chrome windows — they share an
+  executable and a class — so whichever the pool yielded first took the first
+  Chrome-shaped cell and the rest shuffled behind it.
+
+  A leaf now also records the cell it occupied, and the restore takes the live
+  window nearest that cell. Windows puts an application back roughly where it
+  left it, so proximity is a reliable tie-breaker, and it degrades sensibly when
+  it is wrong: a window ends up in a neighbouring cell rather than across the
+  screen.
+
+  Old `splits.json` files no longer parse and are ignored, which costs one
+  layout and rewrites itself on the next save.
+
+### Notes
+
+- **Multi-monitor is supported.** Trees are stored per monitor device name, and
+  every leaf identity carries the display-arrangement fingerprint — so plugging
+  in a different set of screens does not try to apply one arrangement's layout
+  to another. It fails to match and seeds fresh rather than producing nonsense.
+
+- **Virtual desktops are not.** SuperTile does not know which desktop a window
+  is on, so it tiles whatever Windows reports as visible and a saved layout has
+  no notion of which desktop it belonged to. Supporting it means
+  `IVirtualDesktopManager`, whose interface is undocumented and changes between
+  Windows builds; it is not done and is not pretended otherwise.
+
 ## [0.28.5] - 2026-08-19
 
 ### Fixed

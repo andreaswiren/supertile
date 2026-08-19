@@ -884,7 +884,11 @@ impl App {
             // seed an arbitrary tree from the window order and leave nothing
             // for the saved one to attach to.
             if !self.trees.contains_key(&key) {
-                self.restore_tree(&key, &order, m.work_area);
+                let with_rects: Vec<(isize, Rect)> = order
+                    .iter()
+                    .filter_map(|h| live.iter().find(|w| w.hwnd == *h).map(|w| (*h, w.rect)))
+                    .collect();
+                self.restore_tree(&key, &with_rects, m.work_area);
             }
             let tree = self.trees.entry(key.clone()).or_default();
             tree.reconcile(&order, m.work_area);
@@ -2563,7 +2567,12 @@ impl App {
             .iter()
             .filter_map(|(device, tree)| {
                 let key_of = |h: isize| -> Option<String> { self.keys.get(&h).cloned() };
-                tree.to_saved(&key_of).map(|n| (device.clone(), n))
+                let area = crate::monitor::enumerate()
+                    .into_iter()
+                    .find(|m| &m.device == device)
+                    .map(|m| m.work_area)
+                    .unwrap_or_default();
+                tree.to_saved(area, &key_of).map(|n| (device.clone(), n))
             })
             .collect();
         if saved.is_empty() {
@@ -2593,7 +2602,7 @@ impl App {
     /// monitor per run: a tree that could not be filled the first time will not
     /// be any more fillable a moment later, and retrying would fight the user's
     /// own subsequent edits.
-    fn restore_tree(&mut self, device: &str, live: &[isize], area: Rect) {
+    fn restore_tree(&mut self, device: &str, live: &[(isize, Rect)], area: Rect) {
         // Keep trying for a short while after launch, then stop.
         //
         // One attempt was too few. SuperTile usually starts with Windows, so
@@ -2612,12 +2621,30 @@ impl App {
         let Some(saved) = self.saved_trees.get(device).cloned() else {
             return;
         };
-        let mut pool: Vec<isize> = live.to_vec();
-        let mut claim = |key: &str| -> Option<isize> {
-            let idx = pool
+        // Where each candidate is *now*, taken from this pass rather than from
+        // `last_rects`, which is not filled in until the end of it.
+        let rects: std::collections::HashMap<isize, Rect> = live.iter().copied().collect();
+        let mut pool: Vec<isize> = live.iter().map(|(h, _)| *h).collect();
+        let keys = &self.keys;
+        let rects = &rects;
+        let mut claim = |key: &str, want: Rect| -> Option<isize> {
+            // Among the windows of the right kind, the one nearest where the
+            // saved cell was. Identity alone cannot separate four Chrome
+            // windows, and taking whichever came first made them swap places on
+            // every restart.
+            let centre = |r: Rect| ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+            let (wx, wy) = centre(want);
+            let best = pool
                 .iter()
-                .position(|h| self.keys.get(h).map(String::as_str) == Some(key))?;
-            Some(pool.remove(idx))
+                .enumerate()
+                .filter(|(_, h)| keys.get(*h).map(String::as_str) == Some(key))
+                .min_by_key(|(_, h)| {
+                    let (cx, cy) = rects.get(*h).copied().map(centre).unwrap_or((0, 0));
+                    let (dx, dy) = ((cx - wx) as i64, (cy - wy) as i64);
+                    dx * dx + dy * dy
+                })
+                .map(|(i, _)| i)?;
+            Some(pool.remove(best))
         };
         let restored = crate::tree::Tree::from_saved(&saved, &mut claim);
         if restored.layout(area).is_empty() {
