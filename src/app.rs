@@ -60,6 +60,11 @@ const TRAY_RETRY_MS: u32 = 2_000;
 /// Generous: DPI rounding and shadow compensation move an edge a pixel or two
 /// legitimately.
 const PLACEMENT_TOLERANCE: i32 = 4;
+/// How long after startup a saved split layout keeps trying to reattach.
+///
+/// Long enough for the applications that start with Windows to have windows,
+/// short enough to be over before anybody has arranged anything by hand.
+const RESTORE_WINDOW_MS: u64 = 30_000;
 /// Misses before a window is left alone -- counted over time, not over passes.
 const MAX_PLACEMENT_MISSES: u8 = 3;
 /// Minimum gap between two counted misses, in milliseconds.
@@ -286,8 +291,10 @@ pub struct App {
     keys: HashMap<isize, String>,
     /// Split trees as they were last saved, waiting to be matched to windows.
     saved_trees: std::collections::BTreeMap<String, crate::tree::SavedNode>,
-    /// Monitors whose saved tree has already been offered a restore.
-    tried_restore: HashSet<String>,
+    /// Monitors whose saved tree has been restored, or given up on.
+    restored: HashSet<String>,
+    /// Tick count at startup, bounding how long a restore keeps trying.
+    started_at: u64,
     /// Partition trees, per monitor. Only used by [`LayoutKind::Bsp`].
     trees: HashMap<String, crate::tree::Tree>,
     /// The layout in use before a drop switched the monitor to the tree.
@@ -436,7 +443,8 @@ impl App {
             elevated: HashSet::new(),
             checked_elevation: HashSet::new(),
             saved_trees: Self::load_saved_trees(),
-            tried_restore: HashSet::new(),
+            restored: HashSet::new(),
+            started_at: crate::util::tick_ms(),
             layout_before_split: None,
             requested: HashMap::new(),
             misses: HashMap::new(),
@@ -818,6 +826,20 @@ impl App {
             true
         });
 
+        // Identity keys first, before anything asks what a window is.
+        //
+        // These used to be recorded at the end of the pass, alongside the
+        // rectangles -- which is too late for the one caller that matters.
+        // Restoring a saved split layout matches windows by identity, runs
+        // earlier in this same pass, and so found an empty map every time: the
+        // layout was written faithfully on every save and never once restored.
+        for w in &live {
+            self.keys.insert(
+                w.hwnd,
+                crate::memory::make_key(&self.fingerprint, &w.exe, &w.class),
+            );
+        }
+
         let key = m.device.clone();
         let params = self.config.layout.params();
         let kind = self.config.layout.kind;
@@ -1105,10 +1127,6 @@ impl App {
         // a split tree can be saved by identity.
         for (w, _) in &placements {
             self.last_rects.insert(w.hwnd, w.rect);
-            self.keys.insert(
-                w.hwnd,
-                crate::memory::make_key(&self.fingerprint, &w.exe, &w.class),
-            );
         }
 
         if let Some(hwnd) = adopt {
@@ -2576,7 +2594,19 @@ impl App {
     /// be any more fillable a moment later, and retrying would fight the user's
     /// own subsequent edits.
     fn restore_tree(&mut self, device: &str, live: &[isize], area: Rect) {
-        if !self.tried_restore.insert(device.to_string()) {
+        // Keep trying for a short while after launch, then stop.
+        //
+        // One attempt was too few. SuperTile usually starts with Windows, so
+        // the first retile happens while the session is still loading and the
+        // windows a saved layout refers to may not exist yet -- the restore
+        // then failed against a nearly empty desktop and was never retried.
+        // Bounded by time since startup rather than by a count, because what
+        // matters is that it stops before the user begins arranging things.
+        if self.restored.contains(device) {
+            return;
+        }
+        if crate::util::tick_ms().saturating_sub(self.started_at) > RESTORE_WINDOW_MS {
+            self.restored.insert(device.to_string());
             return;
         }
         let Some(saved) = self.saved_trees.get(device).cloned() else {
@@ -2595,6 +2625,7 @@ impl App {
             return;
         }
         crate::log!("restored the saved split layout for {device}");
+        self.restored.insert(device.to_string());
         self.trees.insert(device.to_string(), restored);
     }
 

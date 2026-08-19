@@ -18,6 +18,28 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.28.5] - 2026-08-19
+
+### Fixed
+
+- **The split layout was saved on every run and restored on none of them.**
+  Persistence was added in 0.21.0 and never worked. `splits.json` was written
+  correctly the whole time; the restore matched windows by identity against a
+  map that was not filled in until the *end* of the same retile, so it always
+  looked at an empty map and found nothing. The log said so on every launch —
+  "no saved split layout could be matched to a live window" — and I did not read
+  it.
+
+  Identities are now recorded as soon as the window list is known, before
+  anything asks what a window is.
+
+- **A single failed restore gave up for good.** SuperTile usually starts with
+  Windows, so the first retile happens while the session is still loading and
+  the applications a saved layout refers to may not have windows yet. The
+  attempt is now repeated for thirty seconds after startup — bounded by time
+  rather than by a count, because what matters is that it stops before anyone
+  has begun arranging things by hand.
+
 ## [0.28.4] - 2026-08-18
 
 ### Fixed
