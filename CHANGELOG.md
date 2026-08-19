@@ -18,6 +18,18 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.31.2] - 2026-08-19
+
+### Added
+
+- The verbose log records what the split tree produced for a resize against what
+  was asked of it. A boundary can be found and moved and still be the wrong one:
+  the side and adjacency rules choose it, and if they choose badly the drag
+  succeeds while the window does not follow. Nothing previously distinguished
+  that from a drag that was refused.
+
+  Instrumentation only.
+
 ## [0.31.1] - 2026-08-19
 
 ### Fixed

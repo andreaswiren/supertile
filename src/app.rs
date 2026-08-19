@@ -1910,6 +1910,28 @@ impl App {
                 );
             }
         }
+
+        // What the tree actually produced, against what was asked for. A
+        // boundary can be found and moved and still not be the one under the
+        // cursor -- the side and adjacency rules pick it, and if they pick
+        // wrongly the drag succeeds while the window does not follow.
+        if moved {
+            if let Some(tree) = self.trees.get(device) {
+                if let Some(p) = tree.layout(area).into_iter().find(|p| p.hwnd == hwnd) {
+                    crate::vlog!(
+                        "tree resize: asked {}x{} at {},{} -- tree gives {}x{} at {},{}",
+                        now.width(),
+                        now.height(),
+                        now.left,
+                        now.top,
+                        p.rect.width(),
+                        p.rect.height(),
+                        p.rect.left,
+                        p.rect.top
+                    );
+                }
+            }
+        }
         moved
     }
 

@@ -988,7 +988,7 @@
         "registry+https://github.com/rust-lang/crates.io-index#windows@0.62.2",
         "registry+https://github.com/rust-lang/crates.io-index#winresource@0.1.31"
       ],
-      "ref": "path+source#0.31.1"
+      "ref": "path+source#0.31.2"
     },
     {
       "ref": "registry+https://github.com/rust-lang/crates.io-index#equivalent@1.0.2"
@@ -1203,21 +1203,21 @@
     ],
     "component": {
       "author": "Andreas Wiren <andreas.wiren@gmail.com>",
-      "bom-ref": "path+source#0.31.1",
+      "bom-ref": "path+source#0.31.2",
       "components": [
         {
-          "bom-ref": "path+source#0.31.1 bin-target-0",
+          "bom-ref": "path+source#0.31.2 bin-target-0",
           "name": "supertile",
-          "purl": "pkg:cargo/supertile@0.31.1#src/lib.rs",
+          "purl": "pkg:cargo/supertile@0.31.2#src/lib.rs",
           "type": "library",
-          "version": "0.31.1"
+          "version": "0.31.2"
         },
         {
-          "bom-ref": "path+source#0.31.1 bin-target-1",
+          "bom-ref": "path+source#0.31.2 bin-target-1",
           "name": "supertile",
-          "purl": "pkg:cargo/supertile@0.31.1#src/main.rs",
+          "purl": "pkg:cargo/supertile@0.31.2#src/main.rs",
           "type": "application",
-          "version": "0.31.1"
+          "version": "0.31.2"
         }
       ],
       "description": "Fast, tray-resident fullscreen autotiling window manager and command palette for Windows 11",
@@ -1233,7 +1233,7 @@
         }
       ],
       "name": "supertile",
-      "purl": "pkg:cargo/supertile@0.31.1",
+      "purl": "pkg:cargo/supertile@0.31.2",
       "scope": "required",
       "supplier": {
         "contact": [
@@ -1248,7 +1248,7 @@
         ]
       },
       "type": "application",
-      "version": "0.31.1"
+      "version": "0.31.2"
     },
     "properties": [
       {
@@ -1288,7 +1288,7 @@
         "https://github.com/andreaswiren/supertile"
       ]
     },
-    "timestamp": "2026-08-19T12:52:26Z",
+    "timestamp": "2026-08-19T13:08:07Z",
     "tools": [
       {
         "name": "cargo-cyclonedx",
@@ -1297,7 +1297,7 @@
       }
     ]
   },
-  "serialNumber": "urn:uuid:74fa9188-60d9-59a6-b628-c29a492c150a",
+  "serialNumber": "urn:uuid:6300f888-0b69-576e-9246-ed7684fcc4cc",
   "specVersion": "1.5",
   "version": 1
 }
