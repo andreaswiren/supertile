@@ -18,6 +18,20 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.28.3] - 2026-08-18
+
+### Fixed
+
+- **The prune-releases workflow would abort partway through.** `--cleanup-tag`
+  errors when the tag is already gone — which it usually is here, since
+  deleting a tag by hand turns its release into an orphaned draft — and under
+  `set -e` that stopped the loop at the first one, leaving the job half done
+  with no clear record of where it stopped.
+
+  It now falls back to deleting the release alone, carries on past any single
+  failure, and reports a count at the end so a partial run is visible rather
+  than silent. Re-running is safe and picks up whatever was missed.
+
 ## [0.28.2] - 2026-08-18
 
 ### Fixed

@@ -96,14 +96,25 @@ jobs:
             exit 0
           fi
 
+          # One failure must not abort the rest. `--cleanup-tag` errors when the
+          # tag is already gone -- which it often is, since deleting a tag by
+          # hand turns its release into an orphaned draft -- and under `set -e`
+          # that would stop the loop halfway and leave the job half done with no
+          # obvious record of where it stopped.
+          failed=0
           for tag in "${doomed[@]}"; do
-            if [ "$DEL_TAGS" = "true" ]; then
-              gh release delete "$tag" --yes --cleanup-tag
+            if [ "$DEL_TAGS" = "true" ] && gh release delete "$tag" --yes --cleanup-tag 2>/dev/null; then
               echo "deleted release and tag $tag"
+            elif gh release delete "$tag" --yes 2>/dev/null; then
+              echo "deleted release $tag (tag absent or kept)"
             else
-              gh release delete "$tag" --yes
-              echo "deleted release $tag (tag kept)"
+              echo "::warning::could not delete $tag"
+              failed=$((failed + 1))
             fi
           done
 
           echo "Kept: $KEEP"
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::$failed release(s) could not be deleted; re-run to retry them."
+            exit 1
+          fi
