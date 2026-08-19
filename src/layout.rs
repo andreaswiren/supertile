@@ -706,8 +706,100 @@ pub fn squeeze_deficit(zones: &[Rect], mins: &[(i32, i32)]) -> i64 {
         .sum()
 }
 
+/// What a window's response to a placement reveals about its minimum size.
+///
+/// Returns the width and height it insisted on, where it insisted at all.
+///
+/// A window that ends up bigger than it was asked for has either clamped the
+/// size or ignored the request entirely. Compare only the sizes and the two are
+/// indistinguishable, and treating the second as the first is how an earlier
+/// attempt at this froze GIMP at whatever width it happened to have.
+///
+/// The tell is the anchor. A window that honours a move and refuses a size
+/// keeps one edge exactly where it was put and pushes the opposite edge out:
+/// Chrome asked to be 1024px wide at x=1976 came back 1371px wide at the same
+/// x. A window that ignored the request matches on neither edge. So an axis
+/// only teaches its minimum when one of its two edges landed where we asked.
+pub fn learned_minimum(want: Rect, got: Rect, tolerance: i32) -> (Option<i32>, Option<i32>) {
+    let near = |a: i32, b: i32| (a - b).abs() <= tolerance;
+
+    let width = (got.width() > want.width() + tolerance
+        && (near(got.left, want.left) || near(got.right, want.right)))
+    .then_some(got.width());
+
+    let height = (got.height() > want.height() + tolerance
+        && (near(got.top, want.top) || near(got.bottom, want.bottom)))
+    .then_some(got.height());
+
+    (width, height)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::learned_minimum;
+
+    /// The tolerance the application actually passes: the same figure that
+    /// decides whether a window is refusing at all. A few pixels of rounding
+    /// must not be read as a declared minimum any more than it is read as a
+    /// refusal.
+    const TOL: i32 = 24;
+
+    #[test]
+    fn a_window_that_fitted_teaches_nothing() {
+        let want = Rect::new(100, 100, 900, 700);
+        assert_eq!(learned_minimum(want, want, TOL), (None, None));
+    }
+
+    #[test]
+    fn holding_its_left_edge_and_overflowing_right_states_a_width() {
+        // Straight from the log: asked for 1024 wide at x=1976, came back 1371
+        // wide at the same x. Same left edge, so Chrome honoured the move and
+        // declined the size.
+        let want = Rect::new(1976, 1058, 1976 + 1024, 2117);
+        let got = Rect::new(1976, 1058, 1976 + 1371, 2117);
+        assert_eq!(learned_minimum(want, got, TOL).0, Some(1371));
+    }
+
+    #[test]
+    fn holding_its_right_edge_and_overflowing_left_states_a_width() {
+        let want = Rect::new(2555, 2, 2555 + 1157, 2117);
+        let got = Rect::new(2391, 2, 2391 + 1321, 2117);
+        assert_eq!(learned_minimum(want, got, TOL).0, Some(1321));
+    }
+
+    #[test]
+    fn a_window_that_ignored_the_move_teaches_nothing() {
+        // Bigger than asked, but neither edge landed where it was put: a window
+        // that did not move at all, or one mid-drag. Reading a minimum out of
+        // this is what froze GIMP.
+        let want = Rect::new(2555, 2, 2555 + 1157, 2117);
+        let got = Rect::new(1990, 40, 1990 + 1855, 2100);
+        assert_eq!(learned_minimum(want, got, TOL), (None, None));
+    }
+
+    #[test]
+    fn a_window_smaller_than_asked_teaches_nothing() {
+        let want = Rect::new(100, 100, 1100, 900);
+        let got = Rect::new(100, 100, 700, 500);
+        assert_eq!(learned_minimum(want, got, TOL), (None, None));
+    }
+
+    #[test]
+    fn the_axes_are_judged_independently() {
+        let want = Rect::new(0, 0, 500, 400);
+        let got = Rect::new(0, 0, 900, 400);
+        assert_eq!(learned_minimum(want, got, TOL), (Some(900), None));
+    }
+
+    #[test]
+    fn a_difference_within_tolerance_is_not_a_refusal() {
+        // Five pixels out is the case that was wrongly condemning windows; it
+        // must not be read as a stated minimum either.
+        let want = Rect::new(1976, 1058, 1976 + 1024, 2117);
+        let got = Rect::new(1976, 1058, 1976 + 1029, 2117);
+        assert_eq!(learned_minimum(want, got, TOL), (None, None));
+    }
+
     use super::squeeze_deficit;
 
     #[test]

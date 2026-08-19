@@ -18,6 +18,39 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.31.0] - 2026-08-19
+
+### Fixed
+
+- **Windows were being written off for landing five pixels out.** One tolerance
+  was answering two different questions. Four pixels is a sensible threshold for
+  "worth another attempt at placing this"; it is nowhere near enough to conclude
+  a window will never comply and stop tiling it for twenty seconds. Chrome
+  landing 1029px wide when asked for 1024 was condemned three passes later, and
+  then floated above its neighbours until the retry came round — which is what
+  "loses its gridlock for a while, then re-tiles" was.
+
+  Refusal now needs a 24px deviation. Placement still corrects at four.
+
+- **A one-pixel difference caused a `SetWindowPos` on every pass, forever.** The
+  move filter triggered on any difference at all, so a window sitting a pixel
+  out was asked to move again for as long as it stayed open — a cross-process
+  call into another application's message loop, repeatedly, for something
+  invisible.
+
+### Added
+
+- **SuperTile learns the sizes a window will actually accept.** Chrome reports a
+  657px minimum width through `WM_GETMINMAXINFO` and in practice refuses
+  anything below roughly 1350. Where a window plainly declines — one edge left
+  where it was asked, the other pushed out — that size is remembered and asked
+  for thereafter, so it stops being handed requests it will never honour.
+
+  Deliberately kept out of the squeeze guard, which vetoes drags. Feeding
+  observed minimums into that is precisely what froze every resize in 0.17.2.
+  Avoiding an impossible request is useful; letting an observation overrule the
+  user is not, and the two are one variable apart.
+
 ## [0.30.2] - 2026-08-19
 
 ### Fixed

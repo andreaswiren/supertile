@@ -55,11 +55,24 @@ const TIMER_TRAY_RETRY: usize = 12;
 const TIMER_DRAG: usize = 13;
 const DRAG_POLL_MS: u32 = 16;
 const TRAY_RETRY_MS: u32 = 2_000;
-/// How far a window may sit from where it was put before it counts as a miss.
+/// How far a window may sit from where it was put before it is worth moving.
 ///
-/// Generous: DPI rounding and shadow compensation move an edge a pixel or two
-/// legitimately.
+/// DPI rounding and shadow compensation move an edge a pixel or two
+/// legitimately, and re-issuing a `SetWindowPos` for that is a round trip into
+/// another process's message loop for nothing visible.
 const PLACEMENT_TOLERANCE: i32 = 4;
+/// How far out a window must be before it is called uncooperative.
+///
+/// Deliberately much larger than [`PLACEMENT_TOLERANCE`], because the two
+/// answer different questions. Four pixels is enough to justify another attempt
+/// at placing a window; it is nowhere near enough to conclude the window will
+/// never comply and stop tiling it for twenty seconds.
+///
+/// Chrome was landing five pixels wide of its cell -- invisible, and entirely
+/// tolerable -- and being written off for it three passes later, after which it
+/// stopped following the grid at all. A window that misses by a third of its
+/// width is refusing; one that misses by five pixels has arrived.
+const REFUSAL_TOLERANCE: i32 = 24;
 /// How long after startup a saved split layout keeps trying to reattach.
 ///
 /// Long enough for the applications that start with Windows to have windows,
@@ -276,6 +289,14 @@ pub struct App {
     theme_editor: Box<crate::ui::theme_editor::ThemeEditor>,
     /// A newer release found by a check, for the About window to offer.
     pending_update: Option<(String, String)>,
+    /// Minimum sizes windows have demonstrated, as distinct from reported.
+    ///
+    /// Kept apart from `mins` on purpose, and read in exactly one place: when
+    /// deciding what size to *ask* a window for. It must never reach the
+    /// squeeze guard, which vetoes drags — feeding observed minimums into that
+    /// is what froze every resize in 0.17.2. Avoiding an impossible request is
+    /// useful; letting an observation overrule the user is not.
+    observed_mins: HashMap<isize, (i32, i32)>,
     /// The virtual desktop the last retile saw, part of every layout key.
     current_desktop: Option<String>,
     /// Windows we are not permitted to move, because they are elevated.
@@ -446,6 +467,7 @@ impl App {
             trees: HashMap::new(),
             keys: HashMap::new(),
             theme_editor,
+            observed_mins: HashMap::new(),
             current_desktop: None,
             pending_update: None,
             elevated: HashSet::new(),
@@ -986,7 +1008,10 @@ impl App {
             // Grow the cell to the window's own floor before asking. A cell
             // narrower than the minimum is a request the window will refuse,
             // and three refusals used to get it written off entirely.
-            let min = self.min_size_of(w.hwnd);
+            // What the window says, or what it has shown, whichever is larger.
+            let reported = self.min_size_of(w.hwnd);
+            let seen = self.observed_mins.get(&w.hwnd).copied().unwrap_or((0, 0));
+            let min = (reported.0.max(seen.0), reported.1.max(seen.1));
             placements.push((w, layout::fit_to_minimum(*zone, min, m.work_area)));
         }
 
@@ -1048,10 +1073,30 @@ impl App {
                 if self.unmanageable.contains_key(&w.hwnd) {
                     continue;
                 }
-                let missed = (w.rect.left - want.left).abs() > PLACEMENT_TOLERANCE
-                    || (w.rect.top - want.top).abs() > PLACEMENT_TOLERANCE
-                    || (w.rect.right - want.right).abs() > PLACEMENT_TOLERANCE
-                    || (w.rect.bottom - want.bottom).abs() > PLACEMENT_TOLERANCE;
+                // Learn what the window will actually accept, when it has
+                // clearly declined rather than merely landed askew: one edge
+                // where it was asked, the other pushed out. See
+                // `layout::learned_minimum` for why the anchor test matters.
+                let (lw, lh) = layout::learned_minimum(want, w.rect, REFUSAL_TOLERANCE);
+                if lw.is_some() || lh.is_some() {
+                    let seen = self.observed_mins.entry(w.hwnd).or_insert((0, 0));
+                    let before = *seen;
+                    seen.0 = seen.0.max(lw.unwrap_or(0));
+                    seen.1 = seen.1.max(lh.unwrap_or(0));
+                    if *seen != before {
+                        crate::log!(
+                            "'{}' will not go below {}x{}; asking for that from now on",
+                            w.title,
+                            seen.0,
+                            seen.1
+                        );
+                    }
+                }
+
+                let missed = (w.rect.left - want.left).abs() > REFUSAL_TOLERANCE
+                    || (w.rect.top - want.top).abs() > REFUSAL_TOLERANCE
+                    || (w.rect.right - want.right).abs() > REFUSAL_TOLERANCE
+                    || (w.rect.bottom - want.bottom).abs() > REFUSAL_TOLERANCE;
                 if !missed {
                     self.misses.remove(&w.hwnd);
                     continue;
@@ -1190,10 +1235,14 @@ impl App {
             .iter()
             .filter(|(w, zone)| {
                 let target = w.target_rect_for(*zone);
-                (w.rect.left - target.left).abs() > 1
-                    || (w.rect.top - target.top).abs() > 1
-                    || (w.rect.right - target.right).abs() > 1
-                    || (w.rect.bottom - target.bottom).abs() > 1
+                // A pixel is not worth a cross-process call. This used to
+                // trigger on any difference at all, which meant a window
+                // sitting one pixel out was asked to move on every single pass
+                // for as long as it was open.
+                (w.rect.left - target.left).abs() > PLACEMENT_TOLERANCE
+                    || (w.rect.top - target.top).abs() > PLACEMENT_TOLERANCE
+                    || (w.rect.right - target.right).abs() > PLACEMENT_TOLERANCE
+                    || (w.rect.bottom - target.bottom).abs() > PLACEMENT_TOLERANCE
             })
             .copied()
             .collect();
@@ -3620,6 +3669,8 @@ impl App {
                     self.unmanageable
                         .retain(|h, _| crate::window::is_live(HWND(*h as *mut core::ffi::c_void)));
                     self.mins
+                        .retain(|h, _| crate::window::is_live(HWND(*h as *mut core::ffi::c_void)));
+                    self.observed_mins
                         .retain(|h, _| crate::window::is_live(HWND(*h as *mut core::ffi::c_void)));
                     self.keys
                         .retain(|h, _| crate::window::is_live(HWND(*h as *mut core::ffi::c_void)));
