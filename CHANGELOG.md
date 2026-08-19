@@ -18,6 +18,27 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.31.1] - 2026-08-19
+
+### Fixed
+
+- **In the split layout, some edges resized the window but not the grid.** Two
+  causes, both silent:
+
+  `resize_tree` returned whether it had found a boundary to move, and the caller
+  threw that away. When no boundary qualified — the outer wall of the work area,
+  or a gap in the tree walk — nothing happened and nothing was said, while
+  Windows had already resized the window. The result is a window overlapping its
+  neighbours for no visible reason. The refusal is now reported and shown in
+  amber.
+
+  And the split layout had **no resize clamping at all**. The grid layouts learnt
+  in 0.16.1 to walk a blocked movement back until it fits rather than refusing
+  it outright; the tree never got that, and the 0.17.6 revert removed the one
+  attempt at it. Since Split became the default in 0.25.0, that made the common
+  case a boundary that would not move rather than one that stopped at its limit.
+  It now walks back the same way.
+
 ## [0.31.0] - 2026-08-19
 
 ### Fixed

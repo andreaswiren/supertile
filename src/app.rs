@@ -1566,19 +1566,44 @@ impl App {
         if kind == LayoutKind::Bsp {
             let before = self.squeeze(&m);
             let previous = self.trees.get(&lkey).cloned();
-            self.resize_tree(&lkey, dragged, zone, now, m.work_area);
-            if self.squeeze(&m) > before {
-                // Put the boundary back and stop following the pointer. The
-                // alternative is to overrun a neighbour's minimum, and a window
-                // that has been overrun does not politely stay put.
-                match previous {
-                    Some(t) => {
-                        self.trees.insert(lkey.clone(), t);
-                    }
-                    None => {
-                        self.trees.remove(&lkey);
-                    }
+            let restore = |app: &mut Self| match previous.clone() {
+                Some(t) => {
+                    app.trees.insert(lkey.clone(), t);
                 }
+                None => {
+                    app.trees.remove(&lkey);
+                }
+            };
+
+            // Walk the movement back until it fits, exactly as the grid layouts
+            // have done since 0.16.1. The tree never got this treatment, and
+            // Split is the default layout -- so the common case was a boundary
+            // that refused to move at all rather than one that stopped at its
+            // limit.
+            let mut applied = false;
+            for t in drag::CLAMP_STEPS {
+                restore(self);
+                let probe = drag::lerp_rect(zone, now, t);
+                if !self.resize_tree(&lkey, dragged, zone, probe, m.work_area) {
+                    // No boundary behind this edge -- the outer wall of the
+                    // work area, usually. Walking back cannot conjure one, so
+                    // stop rather than probing four more times in silence.
+                    restore(self);
+                    self.readout.set_warning(true);
+                    return;
+                }
+                if self.squeeze(&m) <= before {
+                    applied = true;
+                    self.readout.set_warning(t < 1.0);
+                    if t < 1.0 {
+                        crate::vlog!("tree resize clamped to {:.0}% of the drag", t * 100.0);
+                    }
+                    break;
+                }
+            }
+            if !applied {
+                restore(self);
+                crate::vlog!("tree resize refused: no part of it fits the minimum sizes");
                 self.readout.set_warning(true);
                 return;
             }
@@ -1846,11 +1871,24 @@ impl App {
     /// The tree resolves which split that is by walking to the innermost one
     /// of the right orientation that encloses the window -- there is no index
     /// arithmetic to get wrong, unlike the parametric path.
-    fn resize_tree(&mut self, device: &str, hwnd: isize, zone: Rect, now: Rect, area: Rect) {
+    ///
+    /// Returns false when no boundary could be moved, which the caller must
+    /// show: the window has already been resized by Windows, so a silent
+    /// failure leaves it overlapping its neighbours with nothing to say why.
+    fn resize_tree(
+        &mut self,
+        device: &str,
+        hwnd: isize,
+        zone: Rect,
+        now: Rect,
+        area: Rect,
+    ) -> bool {
         let Some(tree) = self.trees.get_mut(device) else {
-            return;
+            crate::vlog!("tree resize: no tree for {device}");
+            return false;
         };
         let t = drag::EDGE_THRESHOLD;
+        let mut moved = false;
         for edge in drag::moved_edges(zone, now, t) {
             // `want_second` is which side of the boundary this window is on: a
             // left or top edge is shared with whatever precedes it, so the
@@ -1861,8 +1899,18 @@ impl App {
                 drag::Edge::Top => (crate::tree::Orientation::Vertical, now.top, true),
                 drag::Edge::Bottom => (crate::tree::Orientation::Vertical, now.bottom, false),
             };
-            tree.set_ratio(hwnd, orientation, area, pos, want_second);
+            if tree.set_ratio(hwnd, orientation, area, pos, want_second) {
+                moved = true;
+            } else {
+                // The usual reason is the outer edge of the work area, which
+                // has no boundary behind it. Anything else is a gap in the
+                // walk, and the log is the only place it would show.
+                crate::vlog!(
+                    "tree resize: no boundary for the {edge:?} edge at {pos} (window {hwnd:?})"
+                );
+            }
         }
+        moved
     }
 
     /// Live move: show where the window would land, and what would happen.
