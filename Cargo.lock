@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "supertile"
-version = "0.31.3"
+version = "0.31.4"
 dependencies = [
  "serde",
  "serde_json",

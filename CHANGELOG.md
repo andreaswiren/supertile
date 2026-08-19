@@ -18,6 +18,39 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.31.4] - 2026-08-19
+
+### Fixed
+
+- **Gaps between windows varied from nought to three pixels depending on the
+  drag.** 0.31.0 relaxed the placement threshold from one pixel to four, to
+  avoid re-issuing a `SetWindowPos` for a window sitting a pixel out. The saving
+  was invisible; the cost was not. A window may then rest anywhere within four
+  pixels of its cell, so the gap between any two depended on where the last drag
+  happened to leave them. Even gaps are most of what makes a tiled desktop look
+  tiled.
+
+  Placement is pixel-exact again. The churn that relaxation was aimed at belongs
+  to windows that *cannot* comply, and those are now handled properly: an
+  established refusal is learnt from and the window left alone. A window that
+  can comply does so once and then matches.
+
+- **The gaps in the split layout were uneven by construction.** Every cell was
+  deflated by the same amount, so at an interior boundary two cells each gave up
+  a full gap while the screen edge only had one cell to give. With the default
+  8px that came out as 16px between windows and 8px at the edge.
+
+  The outer margin now belongs to the area and the gap between two windows is
+  shared between them — half deflated off each side of every cell, so the two
+  halves meeting at a boundary add up to one whole gap. 8px means 8px
+  everywhere. Dragging a boundary is corrected by the same half-gap, so a
+  boundary lands where it was let go rather than a few pixels short.
+
+  A test asserts the property for every window count from one to nine: each
+  interior gap exactly `inner_gap`, each screen edge exactly `outer_gap`. It
+  found a second error in the first attempt at this fix, where the outermost
+  cells were still giving up their half-gap and the screen edge came to 12.
+
 ## [0.31.3] - 2026-08-19
 
 ### Fixed

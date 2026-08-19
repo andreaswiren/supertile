@@ -55,12 +55,32 @@ const TIMER_TRAY_RETRY: usize = 12;
 const TIMER_DRAG: usize = 13;
 const DRAG_POLL_MS: u32 = 16;
 const TRAY_RETRY_MS: u32 = 2_000;
-/// How far a window may sit from where it was put before it is worth moving.
+/// The rectangle a split tree is laid out over.
 ///
-/// DPI rounding and shadow compensation move an edge a pixel or two
-/// legitimately, and re-issuing a `SetWindowPos` for that is a round trip into
-/// another process's message loop for nothing visible.
-const PLACEMENT_TOLERANCE: i32 = 4;
+/// The outer margin belongs to the *area*, and the gap between two windows
+/// belongs to the two of them equally: half a gap deflated off each cell, so
+/// the two halves meeting at a shared boundary add up to one whole gap.
+///
+/// Laying the tree out over the whole work area and deflating every cell by the
+/// full gap -- which is what this did until 0.31.4 -- gets the outer margin
+/// right by accident and the interior gaps twice as wide, because at an
+/// interior boundary two cells each contribute a full gap and at the screen
+/// edge only one cell does. With the default eight pixels that is sixteen
+/// between windows and eight at the edge, which is not a look anybody chose.
+///
+/// So the area gives up only what the cells will not: the half-gap every cell
+/// loses on every side is already half the outer margin, and this makes up the
+/// difference. An outer gap smaller than half an inner one inflates past the
+/// work area, which is the right answer -- it means the user asked for windows
+/// flush to the screen edge with space between them.
+///
+/// Every place that hands the tree an area must hand it *this* one -- layout,
+/// reconcile, resize, save and restore -- or boundaries computed in one space
+/// get applied in another.
+fn tree_area(work_area: Rect, outer_gap: i32, inner_gap: i32) -> Rect {
+    work_area.deflate(outer_gap - inner_gap / 2)
+}
+
 /// How far out a window must be before it is called uncooperative.
 ///
 /// Deliberately much larger than [`PLACEMENT_TOLERANCE`], because the two
@@ -936,11 +956,16 @@ impl App {
                     .iter()
                     .filter_map(|h| live.iter().find(|w| w.hwnd == *h).map(|w| (*h, w.rect)))
                     .collect();
-                self.restore_tree(&key, &with_rects, m.work_area);
+                self.restore_tree(
+                    &key,
+                    &with_rects,
+                    tree_area(m.work_area, params.outer_gap, params.inner_gap),
+                );
             }
+            let area = tree_area(m.work_area, params.outer_gap, params.inner_gap);
             let tree = self.trees.entry(key.clone()).or_default();
-            tree.reconcile(&order, m.work_area);
-            let placed = tree.layout(m.work_area);
+            tree.reconcile(&order, area);
+            let placed = tree.layout(area);
             // Re-order `order` to match the tree, so index-based operations
             // (focus, swap, memory) keep agreeing with what is on screen.
             let tree_order: Vec<isize> = placed.iter().map(|p| p.hwnd).collect();
@@ -948,10 +973,9 @@ impl App {
                 o.order = tree_order.clone();
             }
             order = tree_order;
-            let inner = params.inner_gap / 2;
             placed
                 .into_iter()
-                .map(|p| p.rect.deflate(params.outer_gap.max(inner)))
+                .map(|p| p.rect.deflate(params.inner_gap / 2))
                 .collect()
         } else {
             let splits = self.splits_for(&key, kind).clone();
@@ -1242,14 +1266,24 @@ impl App {
             .iter()
             .filter(|(w, zone)| {
                 let target = w.target_rect_for(*zone);
-                // A pixel is not worth a cross-process call. This used to
-                // trigger on any difference at all, which meant a window
-                // sitting one pixel out was asked to move on every single pass
-                // for as long as it was open.
-                (w.rect.left - target.left).abs() > PLACEMENT_TOLERANCE
-                    || (w.rect.top - target.top).abs() > PLACEMENT_TOLERANCE
-                    || (w.rect.right - target.right).abs() > PLACEMENT_TOLERANCE
-                    || (w.rect.bottom - target.bottom).abs() > PLACEMENT_TOLERANCE
+                // Pixel-exact, deliberately.
+                //
+                // This was briefly relaxed to four pixels to avoid re-issuing a
+                // placement for a window sitting a pixel out. The saving was
+                // invisible and the cost was not: a window may then rest
+                // anywhere within four pixels of its cell, so the gaps between
+                // windows came out at nought, one, two or three pixels
+                // depending on where each drag happened to leave things. Even
+                // gaps are most of what makes a tiled desktop look tiled.
+                //
+                // The churn that relaxation was aimed at belongs to windows
+                // that *cannot* comply, and those are handled properly now: an
+                // established refusal is learnt from and the window is left
+                // alone. A window that can comply does, once, and then matches.
+                (w.rect.left - target.left).abs() > 1
+                    || (w.rect.top - target.top).abs() > 1
+                    || (w.rect.right - target.right).abs() > 1
+                    || (w.rect.bottom - target.bottom).abs() > 1
             })
             .copied()
             .collect();
@@ -1323,14 +1357,14 @@ impl App {
 
         if kind == LayoutKind::Bsp {
             if let Some(tree) = self.trees.get(&self.layout_key(&m.device)) {
-                let placed = tree.layout(m.work_area);
+                let placed =
+                    tree.layout(tree_area(m.work_area, params.outer_gap, params.inner_gap));
                 if !placed.is_empty() {
-                    let inner = params.inner_gap / 2;
                     return (
                         placed.iter().map(|p| p.hwnd).collect(),
                         placed
                             .iter()
-                            .map(|p| p.rect.deflate(params.outer_gap.max(inner)))
+                            .map(|p| p.rect.deflate(params.inner_gap / 2))
                             .collect(),
                     );
                 }
@@ -1599,7 +1633,14 @@ impl App {
             for t in drag::CLAMP_STEPS {
                 restore(self);
                 let probe = drag::lerp_rect(zone, now, t);
-                if !self.resize_tree(&lkey, dragged, zone, probe, m.work_area) {
+                if !self.resize_tree(
+                    &lkey,
+                    dragged,
+                    zone,
+                    probe,
+                    tree_area(m.work_area, params.outer_gap, params.inner_gap),
+                    params.inner_gap / 2,
+                ) {
                     // No boundary behind this edge -- the outer wall of the
                     // work area, usually. Walking back cannot conjure one, so
                     // stop rather than probing four more times in silence.
@@ -1897,6 +1938,7 @@ impl App {
         zone: Rect,
         now: Rect,
         area: Rect,
+        gap: i32,
     ) -> bool {
         let Some(tree) = self.trees.get_mut(device) else {
             crate::vlog!("tree resize: no tree for {device}");
@@ -1909,10 +1951,14 @@ impl App {
             // left or top edge is shared with whatever precedes it, so the
             // window is the second child of that split.
             let (orientation, pos, want_second) = match edge {
-                drag::Edge::Left => (crate::tree::Orientation::Horizontal, now.left, true),
-                drag::Edge::Right => (crate::tree::Orientation::Horizontal, now.right, false),
-                drag::Edge::Top => (crate::tree::Orientation::Vertical, now.top, true),
-                drag::Edge::Bottom => (crate::tree::Orientation::Vertical, now.bottom, false),
+                // Half a gap out, because that is how far the cell's drawn
+                // edge sits inside the boundary that actually moves. Without
+                // it the boundary lands short and the window settles a few
+                // pixels from where it was let go.
+                drag::Edge::Left => (crate::tree::Orientation::Horizontal, now.left - gap, true),
+                drag::Edge::Right => (crate::tree::Orientation::Horizontal, now.right + gap, false),
+                drag::Edge::Top => (crate::tree::Orientation::Vertical, now.top - gap, true),
+                drag::Edge::Bottom => (crate::tree::Orientation::Vertical, now.bottom + gap, false),
             };
             if tree.set_ratio(hwnd, orientation, area, pos, want_second) {
                 moved = true;
@@ -2268,7 +2314,14 @@ impl App {
 
         if self.config.layout.kind != LayoutKind::Bsp {
             // Seed from what is on screen now, then adopt the tree.
-            let seed = crate::tree::Tree::from_windows(&order, m.work_area);
+            let seed = crate::tree::Tree::from_windows(
+                &order,
+                tree_area(
+                    m.work_area,
+                    self.config.layout.params().outer_gap,
+                    self.config.layout.params().inner_gap,
+                ),
+            );
             self.trees.insert(key.to_string(), seed);
             self.layout_before_split = Some(self.config.layout.kind);
             self.config.layout.kind = LayoutKind::Bsp;
@@ -2287,10 +2340,13 @@ impl App {
             );
         }
 
-        let tree = self
-            .trees
-            .entry(key.to_string())
-            .or_insert_with(|| crate::tree::Tree::from_windows(&order, m.work_area));
+        let params = self.config.layout.params();
+        let tree = self.trees.entry(key.to_string()).or_insert_with(|| {
+            crate::tree::Tree::from_windows(
+                &order,
+                tree_area(m.work_area, params.outer_gap, params.inner_gap),
+            )
+        });
 
         let orientation = match d.side {
             drag::Side::Horizontal => crate::tree::Orientation::Horizontal,
@@ -2774,7 +2830,10 @@ impl App {
                 let area = crate::monitor::enumerate()
                     .into_iter()
                     .find(|m| m.device == dev)
-                    .map(|m| m.work_area)
+                    .map(|m| {
+                        let p = self.config.layout.params();
+                        tree_area(m.work_area, p.outer_gap, p.inner_gap)
+                    })
                     .unwrap_or_default();
                 tree.to_saved(area, &key_of).map(|n| (device.clone(), n))
             })
@@ -4082,6 +4141,67 @@ pub fn run() -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every gap the same width, whichever pair of windows you measure.
+    ///
+    /// This is the property, not an example: for each window count, each
+    /// interior boundary must show exactly `inner_gap` and each screen edge
+    /// exactly `outer_gap`. The regression this guards ran the other way --
+    /// interior gaps came out at twice the outer margin -- and no single
+    /// rectangle assertion would have shown it, because each rectangle was
+    /// individually plausible.
+    #[test]
+    fn tree_gaps_are_even() {
+        let work = Rect::new(0, 0, 1920, 1080);
+        let outer = 8;
+        let inner = 8;
+
+        for count in 1..=9usize {
+            let handles: Vec<isize> = (1..=count as isize).collect();
+            let area = tree_area(work, outer, inner);
+            let cells: Vec<Rect> = crate::tree::Tree::from_windows(&handles, area)
+                .layout(area)
+                .into_iter()
+                .map(|p| p.rect.deflate(inner / 2))
+                .collect();
+            assert_eq!(cells.len(), count, "{count} windows");
+
+            // The screen edge: the outermost cell edge on each side.
+            let left = cells.iter().map(|c| c.left).min().unwrap();
+            let top = cells.iter().map(|c| c.top).min().unwrap();
+            let right = cells.iter().map(|c| c.right).max().unwrap();
+            let bottom = cells.iter().map(|c| c.bottom).max().unwrap();
+            assert_eq!((left, top), (outer, outer), "outer margin, {count} windows");
+            assert_eq!(
+                (work.right - right, work.bottom - bottom),
+                (outer, outer),
+                "outer margin, {count} windows"
+            );
+
+            // Every interior gap: the *nearest* cell facing each one across a
+            // boundary is one whole inner gap away. Nearest matters -- two
+            // cells can face each other with a third between them, and the
+            // distance across all three is not a gap.
+            for a in &cells {
+                let right = cells
+                    .iter()
+                    .filter(|b| a.top < b.bottom && b.top < a.bottom && b.left >= a.right)
+                    .map(|b| b.left)
+                    .min();
+                if let Some(x) = right {
+                    assert_eq!(x - a.right, inner, "vertical gap, {count} windows");
+                }
+                let below = cells
+                    .iter()
+                    .filter(|b| a.left < b.right && b.left < a.right && b.top >= a.bottom)
+                    .map(|b| b.top)
+                    .min();
+                if let Some(y) = below {
+                    assert_eq!(y - a.bottom, inner, "horizontal gap, {count} windows");
+                }
+            }
+        }
+    }
     use super::*;
     use crate::window::Disposition;
 
