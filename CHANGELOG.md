@@ -18,6 +18,34 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.30.2] - 2026-08-19
+
+### Fixed
+
+- **Nothing could be moved or resized on any desktop.** Three lookups were left
+  keyed by the bare monitor name after 0.30.0 made layouts per-desktop, and each
+  produced silence rather than an error:
+
+  - `drag_resize` counted the windows in the layout to decide whether a resize
+    was possible. With the wrong key there was no entry, the count was zero,
+    zero is fewer than two, and it returned — before reaching any logging, which
+    is why the log showed sessions starting and polling and then nothing at all.
+  - `end_drag` resolved the drop target through the same wrong key, so every
+    swap and every placement found no target and quietly did nothing.
+  - `split_onto` inserted its tree under the monitor rather than the layout, so
+    a split was written where nothing would read it.
+
+  Found from the log: drags were being requested and polled 192 times, while the
+  line that runs a few statements later never appeared once. The gap between
+  those two facts is where the early return had to be.
+
+### Notes
+
+- The cause is that a layout key and a monitor name are both `String`, so
+  passing one where the other belongs compiles. I missed three sites doing
+  exactly that, twice in a row. A newtype would make it impossible rather than
+  merely careful, and that is the right follow-up.
+
 ## [0.30.1] - 2026-08-19
 
 ### Added

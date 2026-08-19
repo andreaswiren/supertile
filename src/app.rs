@@ -1443,7 +1443,14 @@ impl App {
         else {
             return;
         };
-        let count = self.orders.get(&device).map(|o| o.order.len()).unwrap_or(0);
+        // Keyed by the layout, not by the monitor.
+        //
+        // This was the one lookup left using the bare device name after layouts
+        // became per-desktop, and it sits behind an early return: no entry
+        // means a count of zero, zero is fewer than two, and every resize on
+        // every desktop returned here before touching anything. Nothing logged,
+        // because the logging came later in the function.
+        let count = self.orders.get(&lkey).map(|o| o.order.len()).unwrap_or(0);
         if count < 2 {
             return;
         }
@@ -2000,9 +2007,12 @@ impl App {
 
         // Apply whatever the overlay was promising.
         if let Some(d) = session.drop {
+            // The layout key again, not the monitor: with the wrong key there
+            // is no order to index, the target resolves to nothing, and every
+            // swap and every placement quietly does nothing at all.
             let target_hwnd = self
                 .orders
-                .get(&session.device)
+                .get(&session.key)
                 .and_then(|o| o.order.get(d.target).copied());
 
             match d.action {
@@ -2145,7 +2155,7 @@ impl App {
 
         let tree = self
             .trees
-            .entry(device.to_string())
+            .entry(key.to_string())
             .or_insert_with(|| crate::tree::Tree::from_windows(&order, m.work_area));
 
         let orientation = match d.side {
