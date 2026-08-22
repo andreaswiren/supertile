@@ -55,6 +55,58 @@ const TIMER_TRAY_RETRY: usize = 12;
 const TIMER_DRAG: usize = 13;
 const DRAG_POLL_MS: u32 = 16;
 const TRAY_RETRY_MS: u32 = 2_000;
+/// The identity of one layout: a monitor, on a virtual desktop.
+///
+/// A distinct type rather than a `String`, because the two strings in play here
+/// look identical and are not interchangeable. A monitor's device name
+/// (`\.\DISPLAY1`) names a piece of hardware; a layout key (`{guid}|\.\DISPLAY1`)
+/// names the arrangement of windows on that hardware *on one desktop*. Passing
+/// the first where the second belongs compiles perfectly and silently does
+/// nothing: the map lookup misses, and whatever it guarded -- a swap, a resize,
+/// a placement -- is quietly skipped.
+///
+/// That exact mistake shipped five times: 0.30.2 (three lookups at once, which
+/// froze every window on the machine), and twice more found only when a user
+/// reported that swapping windows did nothing. Every one was a `String` going
+/// where a `String` was wanted. The compiler could not help while both were the
+/// same type, so now they are not.
+///
+/// Build one with [`App::layout_key`]. There is deliberately no `From<String>`.
+///
+/// Serialises as the bare string it wraps, so the saved-layout file on disk is
+/// unchanged and layouts written by earlier versions still load.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(transparent)]
+struct LayoutKey(String);
+
+impl LayoutKey {
+    /// The monitor half, for the few places that genuinely need the hardware.
+    ///
+    /// The key is `desktop|device`, or a bare device where the shell would not
+    /// name the desktop. The monitor is the last field either way; a GUID
+    /// contains no pipe.
+    fn device(&self) -> &str {
+        self.0.rsplit('|').next().unwrap_or(&self.0)
+    }
+}
+
+impl std::fmt::Display for LayoutKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The rectangle a split tree is laid out over.
 ///
 /// The outer margin belongs to the *area*, and the gap between two windows
@@ -247,7 +299,7 @@ pub struct App {
     /// Actions bound to a fallback: (action, first choice, what we got).
     fell_back: Vec<(Action, Hotkey, Hotkey)>,
     hooks: Vec<HWINEVENTHOOK>,
-    orders: HashMap<String, MonitorOrder>,
+    orders: HashMap<LayoutKey, MonitorOrder>,
     /// Windows the user has explicitly floated this session.
     floated: HashSet<isize>,
     fingerprint: String,
@@ -333,13 +385,13 @@ pub struct App {
     /// rather than by a handle that will not survive the session.
     keys: HashMap<isize, String>,
     /// Split trees as they were last saved, waiting to be matched to windows.
-    saved_trees: std::collections::BTreeMap<String, crate::tree::SavedNode>,
+    saved_trees: std::collections::BTreeMap<LayoutKey, crate::tree::SavedNode>,
     /// Monitors whose saved tree has been restored, or given up on.
-    restored: HashSet<String>,
+    restored: HashSet<LayoutKey>,
     /// Tick count at startup, bounding how long a restore keeps trying.
     started_at: u64,
     /// Partition trees, per monitor. Only used by [`LayoutKind::Bsp`].
-    trees: HashMap<String, crate::tree::Tree>,
+    trees: HashMap<LayoutKey, crate::tree::Tree>,
     /// The layout in use before a drop switched the monitor to the tree.
     ///
     /// One drag should not be able to change the layout mode permanently with
@@ -351,7 +403,7 @@ pub struct App {
     /// Keyed by layout too: the boundaries of a three-column arrangement mean
     /// nothing once you switch to Master + Stack, and silently reusing them
     /// would produce a layout the user never asked for.
-    splits: HashMap<(String, LayoutKind), Splits>,
+    splits: HashMap<(LayoutKey, LayoutKind), Splits>,
 }
 
 /// A move or resize the user is performing right now.
@@ -363,7 +415,7 @@ struct DragSession {
     ///
     /// Held rather than recomputed: a drag must keep operating on the layout it
     /// began in, even if the desktop changes underneath it.
-    key: String,
+    key: LayoutKey,
     /// Slot the window occupied when the drag began.
     zone_index: usize,
     /// The zone it was sitting in, used as the reference for edge movement.
@@ -1335,10 +1387,10 @@ impl App {
     }
 
     /// Stored split positions for a monitor and layout, or the empty default.
-    fn splits_for(&self, device: &str, kind: LayoutKind) -> &Splits {
+    fn splits_for(&self, key: &LayoutKey, kind: LayoutKind) -> &Splits {
         static EMPTY: std::sync::OnceLock<Splits> = std::sync::OnceLock::new();
         self.splits
-            .get(&(device.to_string(), kind))
+            .get(&(key.clone(), kind))
             .unwrap_or_else(|| EMPTY.get_or_init(Splits::default))
     }
 
@@ -1852,11 +1904,11 @@ impl App {
     /// window on it is replaced, so the name alone is not an identity for a
     /// layout. Combining it with the desktop keeps each desktop's arrangement
     /// to itself.
-    fn layout_key(&self, device: &str) -> String {
-        match &self.current_desktop {
+    fn layout_key(&self, device: &str) -> LayoutKey {
+        LayoutKey(match &self.current_desktop {
             Some(d) => format!("{d}|{device}"),
             None => device.to_string(),
-        }
+        })
     }
 
     /// Re-read the overlay theme after the config has changed on disk.
@@ -1933,15 +1985,15 @@ impl App {
     /// failure leaves it overlapping its neighbours with nothing to say why.
     fn resize_tree(
         &mut self,
-        device: &str,
+        key: &LayoutKey,
         hwnd: isize,
         zone: Rect,
         now: Rect,
         area: Rect,
         gap: i32,
     ) -> bool {
-        let Some(tree) = self.trees.get_mut(device) else {
-            crate::vlog!("tree resize: no tree for {device}");
+        let Some(tree) = self.trees.get_mut(key) else {
+            crate::vlog!("tree resize: no tree for {key}");
             return false;
         };
         let t = drag::EDGE_THRESHOLD;
@@ -1977,7 +2029,7 @@ impl App {
         // cursor -- the side and adjacency rules pick it, and if they pick
         // wrongly the drag succeeds while the window does not follow.
         if moved {
-            if let Some(tree) = self.trees.get(device) {
+            if let Some(tree) = self.trees.get(key) {
                 if let Some(p) = tree.layout(area).into_iter().find(|p| p.hwnd == hwnd) {
                     crate::vlog!(
                         "tree resize: asked {}x{} at {},{} -- tree gives {}x{} at {},{}",
@@ -2200,7 +2252,7 @@ impl App {
                     if let Some(order) = self.orders.get_mut(&session.key) {
                         order.swap(session.zone_index, d.target);
                     }
-                    if let Some(t) = self.trees.get_mut(&session.device) {
+                    if let Some(t) = self.trees.get_mut(&session.key) {
                         if let Some(th) = target_hwnd {
                             t.swap(session.hwnd, th);
                         }
@@ -2293,7 +2345,7 @@ impl App {
     /// silently doing nothing, which is what happened before, is worse.
     fn split_onto(
         &mut self,
-        key: &str,
+        key: &LayoutKey,
         device: &str,
         moved: isize,
         target: isize,
@@ -2322,7 +2374,7 @@ impl App {
                     self.config.layout.params().inner_gap,
                 ),
             );
-            self.trees.insert(key.to_string(), seed);
+            self.trees.insert(key.clone(), seed);
             self.layout_before_split = Some(self.config.layout.kind);
             self.config.layout.kind = LayoutKind::Bsp;
             let _ = self.config.save();
@@ -2341,7 +2393,7 @@ impl App {
         }
 
         let params = self.config.layout.params();
-        let tree = self.trees.entry(key.to_string()).or_insert_with(|| {
+        let tree = self.trees.entry(key.clone()).or_insert_with(|| {
             crate::tree::Tree::from_windows(
                 &order,
                 tree_area(m.work_area, params.outer_gap, params.inner_gap),
@@ -2464,26 +2516,35 @@ impl App {
         let Some(fg) = window::foreground() else {
             return;
         };
-        let (from, to) = {
-            let Some(order) = self.orders.get(&self.layout_key(&m.device)) else {
-                return;
-            };
-            let Some(from) = order.index_of(fg.0 as isize) else {
-                return;
-            };
-            let zones = layout::compute(
-                m.work_area,
-                order.order.len(),
-                self.config.layout.kind,
-                &self.config.layout.params(),
-            );
-            let Some(to) = layout::neighbour(&zones, from, dir) else {
-                return;
-            };
-            (from, to)
+        // The zones as they actually are, not as the parametric engine would
+        // compute them. Under Split -- the default -- the geometry comes from
+        // the tree, and asking `layout::compute` instead returns the grid that
+        // *would* be there under some other layout. The neighbour picked from
+        // it is whatever happens to occupy that index, which is not the window
+        // next to this one on screen.
+        let (order_now, zones) = self.zones_of(&m);
+        let Some(from) = order_now.iter().position(|h| *h == fg.0 as isize) else {
+            return;
         };
-        if let Some(order) = self.orders.get_mut(&m.device) {
+        let Some(to) = layout::neighbour(&zones, from, dir) else {
+            return;
+        };
+        let (Some(a), Some(b)) = (order_now.get(from).copied(), order_now.get(to).copied()) else {
+            return;
+        };
+
+        let lkey = self.layout_key(&m.device);
+        if let Some(order) = self.orders.get_mut(&lkey) {
             order.swap(from, to);
+        }
+        // And the tree, which is where the order comes from under Split.
+        //
+        // Every retile rewrites the window order from the tree, so swapping
+        // the order alone is undone before it can be seen -- the window flicks
+        // back, or more often never moves at all. This is the same fault the
+        // drag-to-swap path had.
+        if let Some(t) = self.trees.get_mut(&lkey) {
+            t.swap(a, b);
         }
         self.retile_monitor(&m);
         window::focus(fg);
@@ -2818,15 +2879,12 @@ impl App {
         let Some(path) = Self::splits_path() else {
             return;
         };
-        let saved: std::collections::BTreeMap<String, crate::tree::SavedNode> = self
+        let saved: std::collections::BTreeMap<LayoutKey, crate::tree::SavedNode> = self
             .trees
             .iter()
             .filter_map(|(device, tree)| {
                 let key_of = |h: isize| -> Option<String> { self.keys.get(&h).cloned() };
-                // The key is `desktop|device`, or a bare device where the
-                // shell would not name the desktop. The monitor is the last
-                // field either way; a GUID contains no pipe.
-                let dev = device.rsplit('|').next().unwrap_or(device);
+                let dev = device.device();
                 let area = crate::monitor::enumerate()
                     .into_iter()
                     .find(|m| m.device == dev)
@@ -2847,7 +2905,7 @@ impl App {
         }
     }
 
-    fn load_saved_trees() -> std::collections::BTreeMap<String, crate::tree::SavedNode> {
+    fn load_saved_trees() -> std::collections::BTreeMap<LayoutKey, crate::tree::SavedNode> {
         let Some(path) = Self::splits_path() else {
             return Default::default();
         };
@@ -2865,7 +2923,7 @@ impl App {
     /// monitor per run: a tree that could not be filled the first time will not
     /// be any more fillable a moment later, and retrying would fight the user's
     /// own subsequent edits.
-    fn restore_tree(&mut self, device: &str, live: &[(isize, Rect)], area: Rect) {
+    fn restore_tree(&mut self, key: &LayoutKey, live: &[(isize, Rect)], area: Rect) {
         // Keep trying for a short while after launch, then stop.
         //
         // One attempt was too few. SuperTile usually starts with Windows, so
@@ -2874,14 +2932,14 @@ impl App {
         // then failed against a nearly empty desktop and was never retried.
         // Bounded by time since startup rather than by a count, because what
         // matters is that it stops before the user begins arranging things.
-        if self.restored.contains(device) {
+        if self.restored.contains(key) {
             return;
         }
         if crate::util::tick_ms().saturating_sub(self.started_at) > RESTORE_WINDOW_MS {
-            self.restored.insert(device.to_string());
+            self.restored.insert(key.clone());
             return;
         }
-        let Some(saved) = self.saved_trees.get(device).cloned() else {
+        let Some(saved) = self.saved_trees.get(key).cloned() else {
             return;
         };
         // Where each candidate is *now*, taken from this pass rather than from
@@ -2890,7 +2948,7 @@ impl App {
         let mut pool: Vec<isize> = live.iter().map(|(h, _)| *h).collect();
         let keys = &self.keys;
         let rects = &rects;
-        let mut claim = |key: &str, want: Rect| -> Option<isize> {
+        let mut claim = |identity: &str, want: Rect| -> Option<isize> {
             // Among the windows of the right kind, the one nearest where the
             // saved cell was. Identity alone cannot separate four Chrome
             // windows, and taking whichever came first made them swap places on
@@ -2900,7 +2958,7 @@ impl App {
             let best = pool
                 .iter()
                 .enumerate()
-                .filter(|(_, h)| keys.get(*h).map(String::as_str) == Some(key))
+                .filter(|(_, h)| keys.get(*h).map(String::as_str) == Some(identity))
                 .min_by_key(|(_, h)| {
                     let (cx, cy) = rects.get(*h).copied().map(centre).unwrap_or((0, 0));
                     let (dx, dy) = ((cx - wx) as i64, (cy - wy) as i64);
@@ -2911,12 +2969,12 @@ impl App {
         };
         let restored = crate::tree::Tree::from_saved(&saved, &mut claim);
         if restored.layout(area).is_empty() {
-            crate::log!("no saved split layout for {device} could be matched to a live window");
+            crate::log!("no saved split layout for {key} could be matched to a live window");
             return;
         }
-        crate::log!("restored the saved split layout for {device}");
-        self.restored.insert(device.to_string());
-        self.trees.insert(device.to_string(), restored);
+        crate::log!("restored the saved split layout for {key}");
+        self.restored.insert(key.clone());
+        self.trees.insert(key.clone(), restored);
     }
 
     fn flush_store(&mut self) {
@@ -4141,6 +4199,34 @@ pub fn run() -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    /// A layout key still reads and writes as the plain string it always was.
+    ///
+    /// The saved-layout file is keyed by these. If the newtype changed the
+    /// encoding, every existing user's arrangement would silently fail to load
+    /// and the layout would come back reset -- which looks exactly like the
+    /// persistence bug that was fixed in 0.28.5, and would be blamed on it.
+    #[test]
+    fn a_layout_key_serialises_as_its_string() {
+        let k = LayoutKey(r"{9a3c...}|\\.\DISPLAY2".to_string());
+        let json = serde_json::to_string(&k).unwrap();
+        assert_eq!(json, serde_json::to_string(&k.0).unwrap());
+        assert_eq!(serde_json::from_str::<LayoutKey>(&json).unwrap(), k);
+    }
+
+    /// The monitor half, with and without a desktop in front of it.
+    #[test]
+    fn a_layout_key_yields_its_monitor() {
+        assert_eq!(
+            LayoutKey(r"{9a3c}|\\.\DISPLAY2".to_string()).device(),
+            r"\\.\DISPLAY2"
+        );
+        // No desktop: the shell would not name one, so the key is bare.
+        assert_eq!(
+            LayoutKey(r"\\.\DISPLAY1".to_string()).device(),
+            r"\\.\DISPLAY1"
+        );
+    }
 
     /// Every gap the same width, whichever pair of windows you measure.
     ///

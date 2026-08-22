@@ -18,6 +18,42 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.32.0] - 2026-08-22
+
+### Fixed
+
+- **Swapping windows did nothing.** Dropping a window on the centre of another
+  looked right — the overlay said "Swap" — and then nothing moved. Two separate
+  causes, both the same mistake:
+
+  - The drag-drop swap looked the split tree up by the *monitor name* instead of
+    the layout key, so it never found a tree and never swapped one. Three lines
+    above it sits a comment warning about exactly this for the lookup beside it.
+  - The keyboard Move actions swapped the window order but not the tree. Under
+    Split — the default — the order is rewritten from the tree on every retile,
+    so the swap was undone before it could be seen. They also picked the
+    neighbouring window from `layout::compute`, which returns the grid some
+    *other* layout would have produced rather than the cells actually on screen,
+    so even the target was wrong.
+
+### Changed
+
+- **A layout key is now its own type.** A monitor device name and a layout key
+  are both strings and are not interchangeable: the first names hardware, the
+  second names the arrangement of windows on that hardware on one virtual
+  desktop. Passing one where the other belonged compiled cleanly and silently
+  did nothing — the lookup missed, and whatever it guarded was skipped.
+
+  That went wrong five times: in 0.30.2 three lookups at once, which left every
+  window on the machine unable to move or resize, and twice more in the swap
+  paths above, found only because a user reported it. Making them distinct types
+  turns each of those from a silent no-op into a compile error. Doing this after
+  0.30.2 — where it was identified as the right fix and not done — would have
+  caught both of today's before they shipped.
+
+  The key still serialises as the bare string it wraps, so saved layouts from
+  earlier versions load unchanged; a test pins that.
+
 ## [0.31.4] - 2026-08-19
 
 ### Fixed
