@@ -13,8 +13,8 @@ pub struct Component {
 }
 
 /// CycloneDX serial number of the SBOM these rows came from.
-pub const SBOM_SERIAL: &str = "urn:uuid:c916060b-7f45-59c3-ad41-9804ff1315d0";
-pub const SBOM_TIMESTAMP: &str = "2026-08-19T13:31:45Z";
+pub const SBOM_SERIAL: &str = "urn:uuid:36f1ac45-b4c6-516c-b880-221af3079cea";
+pub const SBOM_TIMESTAMP: &str = "2026-08-22T14:20:59Z";
 pub const SBOM_SPEC_VERSION: &str = "1.5";
 
 /// 34 third-party components.

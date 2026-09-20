@@ -18,6 +18,47 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.33.0] - 2026-09-20
+
+### Fixed
+
+- **A screensaver or a sleep threw the whole desktop into disarray, and the
+  remembered arrangement was destroyed with it.** Four faults in one chain:
+
+  - Handling `WM_DISPLAYCHANGE` cleared the window orders, the split ratios and
+    the trees before retiling. Blanking the screen sends that message. Nothing
+    in a tree is measured in pixels — it holds ratios and window identities — so
+    none of it needed discarding for a resolution, DPI or topology change.
+    Discarded anyway, the next retile seeded a fresh balanced tree and moved
+    every window into it.
+  - The periodic save then wrote that fresh tree over the remembered one, so the
+    arrangement was not merely disturbed until the next restart. It was gone.
+  - Worse, a save whose in-memory trees were momentarily empty **deleted the
+    saved-layout file outright**. A save landing in the gap between the clear and
+    the retile wiped every remembered arrangement on the machine.
+  - A save also wrote only the monitors it could see, so a monitor that was
+    asleep, switched off, unplugged, or simply on another virtual desktop had its
+    arrangement deleted on every save.
+
+  Saving is now additive: what a pass has nothing to say about is kept, and the
+  file is never deleted for being momentarily empty. A layout is also no longer
+  saved for a monitor that is not currently present, because its cell positions
+  would be recorded against a zero-sized area and come back useless.
+
+- **A lost arrangement could never be restored.** Restoring was allowed only in
+  the first 30 seconds of a run, so anything that disturbed the layout later —
+  a monitor waking, a display change — was permanent until a restart. The window
+  is now re-armed whenever something outside the program may have disturbed
+  things. It still only acts on a monitor that has no layout, so it cannot
+  fight the user's own arrangement.
+
+### Added
+
+- **Resume from sleep is handled explicitly** (`WM_POWERBROADCAST`). Windows does
+  not dependably send a display change when the mode comes back identical —
+  the common case for a laptop lid or an idle timeout — but it does move windows
+  around while the displays are down, so a resume needs a retile regardless.
+
 ## [0.32.0] - 2026-08-22
 
 ### Fixed

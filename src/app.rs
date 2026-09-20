@@ -55,6 +55,22 @@ const TIMER_TRAY_RETRY: usize = 12;
 const TIMER_DRAG: usize = 13;
 const DRAG_POLL_MS: u32 = 16;
 const TRAY_RETRY_MS: u32 = 2_000;
+/// What to write to the saved-layout file, given what is there and what is live.
+///
+/// `fresh` wins where the two overlap; everything else in `previous` is kept.
+/// Separated out and tested because getting it wrong is silent and total: the
+/// file is the only record of how the user's desktop is arranged, and a save
+/// that writes only the live set deletes the arrangement for every monitor that
+/// is asleep, unplugged or on another virtual desktop.
+fn merge_saved(
+    previous: &std::collections::BTreeMap<LayoutKey, crate::tree::SavedNode>,
+    fresh: std::collections::BTreeMap<LayoutKey, crate::tree::SavedNode>,
+) -> std::collections::BTreeMap<LayoutKey, crate::tree::SavedNode> {
+    let mut out = previous.clone();
+    out.extend(fresh);
+    out
+}
+
 /// The identity of one layout: a monitor, on a virtual desktop.
 ///
 /// A distinct type rather than a `String`, because the two strings in play here
@@ -389,7 +405,14 @@ pub struct App {
     /// Monitors whose saved tree has been restored, or given up on.
     restored: HashSet<LayoutKey>,
     /// Tick count at startup, bounding how long a restore keeps trying.
-    started_at: u64,
+    /// When the restore window closes.
+    ///
+    /// Re-armed, not fixed at startup: an arrangement can be lost long after
+    /// launch -- a monitor sleeps, a display change arrives -- and a restore
+    /// that can only run in the first half-minute of a run cannot bring it
+    /// back. Bounded in time rather than by a count so that it stops before
+    /// the user starts arranging things by hand.
+    restore_until: u64,
     /// Partition trees, per monitor. Only used by [`LayoutKind::Bsp`].
     trees: HashMap<LayoutKey, crate::tree::Tree>,
     /// The layout in use before a drop switched the monitor to the tree.
@@ -546,7 +569,7 @@ impl App {
             checked_elevation: HashSet::new(),
             saved_trees: Self::load_saved_trees(),
             restored: HashSet::new(),
-            started_at: crate::util::tick_ms(),
+            restore_until: crate::util::tick_ms() + RESTORE_WINDOW_MS,
             layout_before_split: None,
             requested: HashMap::new(),
             misses: HashMap::new(),
@@ -1911,6 +1934,17 @@ impl App {
         })
     }
 
+    /// Let saved arrangements be restored again for the next little while.
+    ///
+    /// Called when something outside the program may have disturbed the
+    /// layout: a display change, a resume from sleep. Restoring is still gated
+    /// on a monitor having no tree, so this costs nothing when nothing was
+    /// lost -- it only reopens the door.
+    fn rearm_restore(&mut self) {
+        self.restore_until = crate::util::tick_ms() + RESTORE_WINDOW_MS;
+        self.restored.clear();
+    }
+
     /// Re-read the overlay theme after the config has changed on disk.
     fn apply_overlay_theme(&self) {
         let name = &self.config.appearance.overlay_theme;
@@ -2875,34 +2909,52 @@ impl App {
     /// Keyed by the display fingerprint as well as the device name because a
     /// tree shaped for a 5120px ultrawide is nonsense on a laptop panel, and
     /// docking changes both without changing the device name.
-    fn save_trees(&self) {
+    fn save_trees(&mut self) {
         let Some(path) = Self::splits_path() else {
             return;
         };
-        let saved: std::collections::BTreeMap<LayoutKey, crate::tree::SavedNode> = self
-            .trees
-            .iter()
-            .filter_map(|(device, tree)| {
-                let key_of = |h: isize| -> Option<String> { self.keys.get(&h).cloned() };
-                let dev = device.device();
-                let area = crate::monitor::enumerate()
-                    .into_iter()
-                    .find(|m| m.device == dev)
-                    .map(|m| {
-                        let p = self.config.layout.params();
-                        tree_area(m.work_area, p.outer_gap, p.inner_gap)
-                    })
-                    .unwrap_or_default();
-                tree.to_saved(area, &key_of).map(|n| (device.clone(), n))
-            })
-            .collect();
+        // Start from what is already on disk and overlay onto it, rather than
+        // writing only what is in memory right now.
+        //
+        // A monitor that is asleep, switched off or unplugged is not in
+        // `enumerate()`, and the virtual desktop you are not looking at has no
+        // tree loaded. Writing just the live set therefore deleted the
+        // arrangement for everything else -- which is most of it, for anyone
+        // with two monitors or two desktops.
+        let mut fresh: std::collections::BTreeMap<LayoutKey, crate::tree::SavedNode> =
+            Default::default();
+        let monitors = crate::monitor::enumerate();
+        for (lkey, tree) in self.trees.iter() {
+            // No monitor, no area, and no save. `to_saved` records where each
+            // leaf sits so the restore can tell four Chrome windows apart; laid
+            // out over a zero rect every one of those comes out as zero, and
+            // the saved layout is left intact but useless. Keeping the previous
+            // entry is strictly better than overwriting it with nothing.
+            let Some(m) = monitors.iter().find(|m| m.device == lkey.device()) else {
+                continue;
+            };
+            let p = self.config.layout.params();
+            let area = tree_area(m.work_area, p.outer_gap, p.inner_gap);
+            let key_of = |h: isize| -> Option<String> { self.keys.get(&h).cloned() };
+            if let Some(node) = tree.to_saved(area, &key_of) {
+                fresh.insert(lkey.clone(), node);
+            }
+        }
+        let saved = merge_saved(&self.saved_trees, fresh);
+        // An empty map means we have nothing to add, not that the user wants
+        // their layouts forgotten. This used to delete the file, so a single
+        // save while the trees were momentarily empty -- which is exactly what
+        // a display change caused -- wiped every remembered arrangement.
         if saved.is_empty() {
-            let _ = std::fs::remove_file(&path);
             return;
         }
         if let Ok(text) = serde_json::to_string_pretty(&saved) {
             let _ = std::fs::write(&path, text);
         }
+        // Keep the merge base current, or the next save for a monitor that has
+        // since gone away would fall back to whatever was on disk at startup
+        // and undo everything done to it in between.
+        self.saved_trees = saved;
     }
 
     fn load_saved_trees() -> std::collections::BTreeMap<LayoutKey, crate::tree::SavedNode> {
@@ -2924,18 +2976,18 @@ impl App {
     /// be any more fillable a moment later, and retrying would fight the user's
     /// own subsequent edits.
     fn restore_tree(&mut self, key: &LayoutKey, live: &[(isize, Rect)], area: Rect) {
-        // Keep trying for a short while after launch, then stop.
+        // Keep trying for a short while, then stop.
         //
         // One attempt was too few. SuperTile usually starts with Windows, so
         // the first retile happens while the session is still loading and the
         // windows a saved layout refers to may not exist yet -- the restore
         // then failed against a nearly empty desktop and was never retried.
-        // Bounded by time since startup rather than by a count, because what
-        // matters is that it stops before the user begins arranging things.
+        // Bounded by time rather than by a count, because what matters is that
+        // it stops before the user begins arranging things.
         if self.restored.contains(key) {
             return;
         }
-        if crate::util::tick_ms().saturating_sub(self.started_at) > RESTORE_WINDOW_MS {
+        if crate::util::tick_ms() > self.restore_until {
             self.restored.insert(key.clone());
             return;
         }
@@ -3905,14 +3957,45 @@ impl App {
                 }
                 _ => None,
             },
-            // The display arrangement changed: re-derive everything.
+            // The display arrangement changed: re-derive the geometry, and
+            // *only* the geometry.
+            //
+            // This used to clear the orders, the split ratios and the trees
+            // before retiling, on the reasoning that a display change
+            // invalidates everything. It does not. A tree holds ratios and
+            // window identities; split ratios are fractions. None of it is
+            // measured in pixels, so all of it survives a resolution, DPI or
+            // topology change -- laying it out again against the new work area
+            // is the whole of the work.
+            //
+            // Clearing it was the reason a screensaver or a sleep threw the
+            // desktop into disarray. Blanking the screen sends this message,
+            // the arrangement was discarded, and the next retile seeded a fresh
+            // balanced tree and moved every window into it. The periodic save
+            // then wrote that over the remembered layout, so the arrangement
+            // was not merely disturbed until the next restart -- it was gone.
             WM_DISPLAYCHANGE | WM_DPICHANGED => {
-                self.orders.clear();
-                self.splits.clear();
-                self.trees.clear();
+                // A monitor may have come back, with nothing laid out on it.
+                self.rearm_restore();
                 self.retile_all();
                 self.update_dimming();
                 Some(LRESULT(0))
+            }
+            // Coming back from sleep or hibernation.
+            //
+            // Windows usually sends a display change too, but not dependably --
+            // it is skipped when the mode comes back identical, which is the
+            // common case for a laptop lid or an idle timeout. Windows also
+            // moves windows about while the displays are down, so a resume
+            // needs a retile whether or not the mode changed.
+            WM_POWERBROADCAST
+                if wp.0 as u32 == PBT_APMRESUMEAUTOMATIC || wp.0 as u32 == PBT_APMRESUMESUSPEND =>
+            {
+                crate::log!("resumed from sleep; re-tiling");
+                self.rearm_restore();
+                self.retile_all();
+                self.update_dimming();
+                Some(LRESULT(1))
             }
             WM_SETTINGCHANGE => {
                 // Covers work-area changes (taskbar auto-hide, appbars).
@@ -4199,6 +4282,47 @@ pub fn run() -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    fn leaf(name: &str) -> crate::tree::SavedNode {
+        crate::tree::SavedNode::Leaf {
+            key: name.to_string(),
+            rect: Rect::new(0, 0, 100, 100),
+        }
+    }
+
+    /// A save never loses an arrangement it did not have anything to say about.
+    ///
+    /// The monitor that is asleep, switched off, unplugged, or simply on the
+    /// virtual desktop you are not looking at contributes nothing to a save.
+    /// Writing only the live set therefore deleted it. This is the property
+    /// that stops that: what is not mentioned is kept.
+    #[test]
+    fn saving_keeps_layouts_it_cannot_see() {
+        let mut previous = std::collections::BTreeMap::new();
+        previous.insert(LayoutKey("desk1|MON_A".into()), leaf("a"));
+        previous.insert(LayoutKey("desk1|MON_B".into()), leaf("b"));
+
+        // Only monitor A is awake this pass.
+        let mut fresh = std::collections::BTreeMap::new();
+        fresh.insert(LayoutKey("desk1|MON_A".into()), leaf("a-rearranged"));
+
+        let out = merge_saved(&previous, fresh);
+        assert_eq!(out.len(), 2, "the sleeping monitor kept its layout");
+        assert_eq!(out[&LayoutKey("desk1|MON_A".into())], leaf("a-rearranged"));
+        assert_eq!(out[&LayoutKey("desk1|MON_B".into())], leaf("b"));
+    }
+
+    /// Nothing live at all must still not erase anything.
+    ///
+    /// This is the display-change case exactly: for a moment there are no
+    /// trees, and a save landing in that moment used to delete the file.
+    #[test]
+    fn saving_nothing_erases_nothing() {
+        let mut previous = std::collections::BTreeMap::new();
+        previous.insert(LayoutKey("desk1|MON_A".into()), leaf("a"));
+        let out = merge_saved(&previous, Default::default());
+        assert_eq!(out, previous);
+    }
 
     /// A layout key still reads and writes as the plain string it always was.
     ///
