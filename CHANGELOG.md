@@ -18,6 +18,49 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.34.0] - 2026-09-23
+
+### Fixed
+
+- **Running the test suite repointed your autostart at a build artefact.** The
+  test covering the `HKCU\...\Run` value writes to the real key and puts back
+  what it found — but it restored only *whether* a value existed, not what it
+  said, by calling `set_enabled(true)`. That writes `current_exe()`, which under
+  `cargo test` is the test harness in `target/debug/deps`. So running the suite
+  on a machine with autostart enabled left Windows launching a test binary at
+  every logon instead of SuperTile, and it was self-perpetuating: the harness
+  runs the test, which points the entry back at the harness.
+
+  The test now saves and restores the exact value, byte for byte.
+
+- **`registered_command()` reported what *would* be written, not what is.** It
+  returned `command_line()` — the running executable — under a name that says
+  otherwise, so a stale or wrong autostart entry was invisible from inside the
+  program, which is exactly the fault above. It now reads the registry.
+
+### Added
+
+- **Install an update from the About window.** A release that publishes a binary
+  and a `.sha256` beside it can be downloaded and installed in place: the
+  digest is checked before anything is written, the old executable is moved
+  aside rather than overwritten, and SuperTile restarts into the new one.
+
+  Constraints worth knowing. Both URLs must be under this repository or no
+  Install is offered. The digest is a checksum, not a signature — it shows the
+  bytes are the ones GitHub served, not who built them. And SuperTile does not
+  elevate: where the install directory needs permission, as `C:\Program Files`
+  does, one `cmd` command goes to UAC for you to approve.
+
+  `SECURITY.md` and the compliance documents have been revised, including a new
+  **T11** in the threat model for the residual risk, since "nothing is ever
+  downloaded" was previously true and no longer is.
+
+### Changed
+
+- The tray menu item **About & SBOM…** is now just **About…**, and the menu
+  shows the running version as plain text. Which build is running is the first
+  thing a bug report needs, and it should not require opening a window.
+
 ## [0.33.0] - 2026-09-20
 
 ### Fixed

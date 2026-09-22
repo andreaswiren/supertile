@@ -2747,7 +2747,7 @@ impl App {
                     crate::log!("update available: {version}");
                     self.tray.balloon(
                         &format!("SuperTile {version} is available"),
-                        "Open the About window to see what changed and download it. Nothing has been downloaded or installed.",
+                        "Open the About window to see what changed and install it. Nothing has been downloaded yet.",
                     );
                     self.pending_update = Some((version.clone(), url.clone()));
                 }

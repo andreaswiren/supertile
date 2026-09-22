@@ -45,6 +45,12 @@ enum LinkAction {
     CheckForUpdate,
     /// Open the release page a check has already found.
     OpenRelease(String),
+    /// Download the published binary, check it against its digest, and put it
+    /// in place of the running one.
+    InstallUpdate {
+        exe_url: String,
+        sha_url: String,
+    },
 }
 
 struct State {
@@ -59,6 +65,8 @@ struct State {
     status: String,
     /// A newer release, once a check has found one.
     newer: Option<(String, String)>,
+    /// Its downloadable binary and digest, when the release published both.
+    assets: Option<(String, String)>,
     font_h1: Font,
     font_h2: Font,
     font_body: Font,
@@ -91,6 +99,7 @@ impl About {
                 hovered: None,
                 status: String::new(),
                 newer: None,
+                assets: None,
                 font_h1: Font::ui(19, dpi, 600),
                 font_h2: Font::ui(12, dpi, 600),
                 font_body: Font::ui(10, dpi, 400),
@@ -262,6 +271,7 @@ impl About {
             LinkAction::Open(url) => open_url(url),
             LinkAction::OpenRelease(url) => open_url(&url),
             LinkAction::CheckForUpdate => {
+                let mut assets = None;
                 let (msg, newer) = match crate::update::check_latest() {
                     crate::update::Outcome::UpToDate => (
                         format!(
@@ -270,15 +280,53 @@ impl About {
                         ),
                         None,
                     ),
-                    crate::update::Outcome::Available { version, url, .. } => (
-                        format!("SuperTile {version} is available."),
-                        Some((version, url)),
-                    ),
+                    crate::update::Outcome::Available {
+                        version,
+                        url,
+                        exe_url,
+                        sha_url,
+                        ..
+                    } => {
+                        assets = exe_url.zip(sha_url);
+                        (
+                            format!("SuperTile {version} is available."),
+                            Some((version, url)),
+                        )
+                    }
                     crate::update::Outcome::Failed(reason) => (reason, None),
                 };
                 if let Ok(mut st) = self.state.try_borrow_mut() {
                     st.status = msg;
                     st.newer = newer;
+                    st.assets = assets;
+                }
+            }
+            LinkAction::InstallUpdate { exe_url, sha_url } => {
+                // Blocking, on the UI thread, deliberately.
+                //
+                // The window is modal in spirit -- the user has just clicked
+                // "Install" and has nothing else to do in it -- and a progress
+                // bar for a one-megabyte download is more machinery than the
+                // wait justifies. The status line says what is happening
+                // first so the window is not silently unresponsive.
+                if let Ok(mut st) = self.state.try_borrow_mut() {
+                    st.status = "Downloading and checking the digest…".to_string();
+                }
+                let msg = match crate::update::download_verified(&exe_url, &sha_url) {
+                    Err(e) => format!("Update failed: {e}"),
+                    Ok(file) => match crate::update::install(&file) {
+                        Err(e) => format!("Update failed: {e}"),
+                        Ok(crate::update::Install::Replaced) => {
+                            crate::log!("update installed; restarting");
+                            restart_into_new_version()
+                        }
+                        Ok(crate::update::Install::NeedsElevation(pending)) => {
+                            elevated_swap(&pending)
+                        }
+                    },
+                };
+                if let Ok(mut st) = self.state.try_borrow_mut() {
+                    st.status = msg;
                 }
             }
             LinkAction::ExportSbom => {
@@ -403,9 +451,17 @@ fn draw_document(st: &mut State, buf: &BackBuffer, w: i32, h: i32) -> i32 {
     // The update entry changes shape once a newer release is known: offering
     // "check" when the answer is already in hand would be asking a question
     // twice.
-    let update_link = match st.newer.clone() {
-        Some((version, url)) => (format!("Get {version}…"), LinkAction::OpenRelease(url)),
-        None => ("Check for updates".to_string(), LinkAction::CheckForUpdate),
+    // Three shapes, not two. Once a check has found a release *and* that
+    // release published a binary with a digest beside it, the useful offer is
+    // to install it rather than to open a web page and let the user do by hand
+    // what the program can do correctly.
+    let update_link = match (st.newer.clone(), st.assets.clone()) {
+        (Some((version, _)), Some((exe_url, sha_url))) => (
+            format!("Install {version}…"),
+            LinkAction::InstallUpdate { exe_url, sha_url },
+        ),
+        (Some((version, url)), None) => (format!("Get {version}…"), LinkAction::OpenRelease(url)),
+        (None, _) => ("Check for updates".to_string(), LinkAction::CheckForUpdate),
     };
     let links: Vec<(String, LinkAction)> = vec![
         ("Repository".to_string(), LinkAction::Open(crate::APP_REPO)),
@@ -796,6 +852,111 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         // SAFETY: default handling for messages we do not process; every
         // argument came from the system unchanged.
         _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
+    }
+}
+
+/// Start the newly-installed executable and leave.
+///
+/// The replacement already has the old one's path, so this is just a launch.
+/// Exiting is left to the caller returning: the running process still owns the
+/// tray icon and the window hooks, and two copies must not overlap.
+fn restart_into_new_version() -> String {
+    let Ok(exe) = std::env::current_exe() else {
+        return "Updated. Restart SuperTile to use the new version.".to_string();
+    };
+    match std::process::Command::new(exe).spawn() {
+        Ok(_) => {
+            // Give the new process a moment to take the single-instance mutex
+            // only after this one has released it, which happens on exit.
+            request_app_exit();
+            "Updated. SuperTile is restarting…".to_string()
+        }
+        Err(_) => "Updated. Restart SuperTile to use the new version.".to_string(),
+    }
+}
+
+/// Ask for one elevated move, for an install the user cannot write to.
+///
+/// `C:\Program Files` is the documented install location and is not writable
+/// without elevation. SuperTile does not run elevated and is not going to
+/// start: instead a single `cmd` line does the swap and relaunch, and the user
+/// sees and approves exactly that one action in the UAC prompt.
+///
+/// Both paths come from `current_exe()` and our own temporary directory, never
+/// from the network -- but they are still refused if they contain a quote,
+/// because they are about to be pasted into a command line.
+fn elevated_swap(pending: &std::path::Path) -> String {
+    let Ok(target) = std::env::current_exe() else {
+        return "Downloaded, but SuperTile could not locate its own path.".to_string();
+    };
+    let (Some(new), Some(old)) = (pending.to_str(), target.to_str()) else {
+        return "Downloaded, but the install path is not representable.".to_string();
+    };
+    if new.contains('"') || old.contains('"') {
+        return "Downloaded, but the install path contains a quote; install it by hand."
+            .to_string();
+    }
+
+    // Wait for this process to release the file, move the old aside, put the
+    // new one in its place, then start it.
+    let args = format!(
+        r#"/c timeout /t 2 /nobreak >nul & move /y "{old}" "{old}.old" >nul & move /y "{new}" "{old}" >nul & start "" "{old}""#
+    );
+    let verb = crate::util::WideStr::new("runas");
+    let file = crate::util::WideStr::new("cmd.exe");
+    let params = crate::util::WideStr::new(&args);
+    // SAFETY: all three strings outlive the call; a null window handle is
+    // documented as "no owner"; SW_HIDE keeps the console from flashing.
+    let result = unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(
+            None,
+            verb.as_pcwstr(),
+            file.as_pcwstr(),
+            params.as_pcwstr(),
+            windows::core::PCWSTR::null(),
+            windows::Win32::UI::WindowsAndMessaging::SW_HIDE,
+        )
+    };
+    // ShellExecuteW returns a value above 32 on success. Below that includes
+    // the case that matters most: the user declined the prompt.
+    if result.0 as usize > 32 {
+        request_app_exit();
+        "Downloaded. Approve the prompt to finish installing; SuperTile will restart.".to_string()
+    } else {
+        let _ = std::fs::remove_file(pending);
+        format!(
+            "Downloaded, but installing into {} needs permission, which was not given.",
+            target
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        )
+    }
+}
+
+/// Ask the main window to shut the program down.
+///
+/// The About window cannot exit the process itself: the tray icon, the hotkeys
+/// and the WinEvent hook all belong to the host window and are released in its
+/// teardown. A ghost tray icon is the usual price for skipping that.
+fn request_app_exit() {
+    let class = crate::util::WideStr::new("SuperTile.Host");
+    // SAFETY: the class name outlives the call; a miss returns an error, and
+    // posting to a window that has gone is harmless.
+    unsafe {
+        if let Ok(h) = windows::Win32::UI::WindowsAndMessaging::FindWindowW(
+            class.as_pcwstr(),
+            windows::core::PCWSTR::null(),
+        ) {
+            if !h.is_invalid() {
+                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    Some(h),
+                    windows::Win32::UI::WindowsAndMessaging::WM_CLOSE,
+                    windows::Win32::Foundation::WPARAM(0),
+                    windows::Win32::Foundation::LPARAM(0),
+                );
+            }
+        }
     }
 }
 

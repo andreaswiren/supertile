@@ -111,9 +111,84 @@ fn is_enabled_with(key: HKEY) -> bool {
     status == ERROR_SUCCESS
 }
 
-/// The exact command that would be written, for display in the UI.
+/// What is actually registered, read back from the registry.
+///
+/// This used to return `command_line()` -- the command that *would* be written
+/// -- under a name that says otherwise. Every caller wanting to show the user
+/// what starts with Windows was therefore shown the running executable, which
+/// is the one path guaranteed to look right whether or not the registry agreed.
+/// A stale or wrong entry could not be seen from inside the program at all.
 pub fn registered_command() -> Option<String> {
-    command_line()
+    read_value()
+}
+
+/// The raw `REG_SZ` under our value name, if there is one.
+fn read_value() -> Option<String> {
+    let key = open(KEY_READ)?;
+    let name = crate::util::WideStr::new(VALUE_NAME);
+    let mut kind = REG_SZ;
+    let mut size: u32 = 0;
+    // SAFETY: a size-and-type query; the data pointer is None.
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_pcwstr(),
+            None,
+            Some(&mut kind),
+            None,
+            Some(&mut size),
+        )
+    };
+    if status != ERROR_SUCCESS || kind != REG_SZ || size == 0 {
+        close(key);
+        return None;
+    }
+    // `size` is in bytes and includes the terminating NUL.
+    let mut buf = vec![0u8; size as usize];
+    // SAFETY: `buf` is exactly the size the query asked for.
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_pcwstr(),
+            None,
+            None,
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        )
+    };
+    close(key);
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+    let wide: Vec<u16> = buf
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|c| *c != 0)
+        .collect();
+    Some(String::from_utf16_lossy(&wide))
+}
+
+/// Write an exact command string. Used to put back what a test found.
+///
+/// Test-only on purpose: the program itself has exactly one command it may
+/// register, and that is `command_line()`. A general "write whatever you like
+/// into HKCU Run" is not something the rest of the code should be able to
+/// reach for.
+#[cfg(test)]
+fn write_value(cmd: &str) -> bool {
+    let Some(key) = open(KEY_WRITE) else {
+        return false;
+    };
+    let name = crate::util::WideStr::new(VALUE_NAME);
+    let value = crate::util::WideStr::new(cmd);
+    let bytes = value.len_with_nul() * std::mem::size_of::<u16>();
+    // SAFETY: the slice describes exactly the UTF-16 buffer inside `value`,
+    // including its NUL, which is what REG_SZ requires.
+    let data = unsafe { std::slice::from_raw_parts(value.as_pcwstr().0 as *const u8, bytes) };
+    // SAFETY: `name` and `data` outlive the call.
+    let status = unsafe { RegSetValueExW(key, name.as_pcwstr(), None, REG_SZ, Some(data)) };
+    close(key);
+    status == ERROR_SUCCESS
 }
 
 const _: () = {
@@ -156,7 +231,15 @@ mod tests {
         // not a failing one, and asserting on it turns "this environment has no
         // registry" into "this code is broken". The test still runs in full
         // wherever the key exists, which is every machine SuperTile ships to.
-        let was = is_enabled();
+        //
+        // The *exact value* is saved and put back, not merely whether one
+        // existed. Restoring with `set_enabled(true)` writes `current_exe()`,
+        // which under `cargo test` is the test harness in `target/debug/deps`
+        // -- so running the suite on a developer's own machine repointed their
+        // autostart at a test binary, and every subsequent logon launched that
+        // instead of SuperTile. It is also self-perpetuating: the harness runs
+        // this test, which points the entry back at the harness.
+        let was = read_value();
 
         if !set_enabled(true) {
             eprintln!("skipping: HKCU Run is not writable in this environment");
@@ -170,8 +253,10 @@ mod tests {
         // Disabling twice must not report failure.
         assert!(set_enabled(false));
 
-        if was {
-            let _ = set_enabled(true);
+        // Byte-for-byte what was there, or nothing if there was nothing.
+        if let Some(previous) = was {
+            assert!(write_value(&previous), "must restore the user's own entry");
+            assert_eq!(read_value().as_deref(), Some(previous.as_str()));
         }
     }
 }

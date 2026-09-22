@@ -208,8 +208,16 @@ What exists now:
 - **One trigger.** `updates.check_automatically`, which defaults to `false`. With
   it off, the program makes no connection of any kind. With it on, one request
   per day plus any the user asks for by hand.
-- **One direction.** The response is read; nothing is uploaded, and nothing is
-  downloaded or executed. A newer version produces a notification and a link.
+- **One direction.** Nothing is ever uploaded. The version check reads a
+  response and nothing else.
+- **One download, on request.** From 0.34.0 the About window can fetch the
+  release binary and the `.sha256` published beside it, and install it. It
+  happens only on an explicit click, only from a URL under
+  `https://github.com/andreaswiren/supertile/`, and only if the binary matches
+  the published digest. The digest is a checksum and not a signature: it
+  establishes that the bytes are the ones GitHub served, not who produced them.
+  Installing does not elevate SuperTile; where the install directory needs
+  permission, one `cmd` command is submitted to UAC for the user to approve.
 
 The request discloses what any HTTPS request discloses: source IP, timing, and a
 `User-Agent` of `supertile/<version>`. No identifier is attached and no

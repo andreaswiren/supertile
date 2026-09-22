@@ -27,6 +27,23 @@ nothing; and the URL is rejected unless it is under the project's own GitHub
 path, because it later reaches `ShellExecuteW`. With the check disabled the
 program makes no network connection at all.
 
+From 0.34.0 the same feature can also **download and install** a release, on an
+explicit click and no other way. That widens this considerably: bytes fetched
+over the network are written over the running executable and then run. What
+holds it in: both URLs must be under the project's own GitHub path or nothing is
+fetched; the binary must match the `.sha256` published beside it or nothing is
+written; and the replacement is put in place by rename, with the previous
+executable kept until the next start.
+
+The digest bounds corruption, not authorship. It shows the bytes are the ones
+GitHub served for that release; it says nothing about who built them, since
+whoever can publish a release can publish its digest. **T11** below covers the
+residual risk.
+
+Installing does not elevate SuperTile. Where the install directory is not
+user-writable, one `cmd` command is submitted to UAC and the user approves it;
+the program itself stays unelevated.
+
 An earlier version of this document said SuperTile had *no network access*. That
 was true when written and is no longer, and it is recorded here rather than
 edited away: a threat model people rely on has to show where its own claims have
@@ -195,6 +212,39 @@ The autostart entry is a persistence mechanism.
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value pointing at the
 executable's own path, visible in Task Manager's Startup tab and removable
 there. Nothing is written to `HKLM`.
+
+**A failure worth recording.** Until 0.34.0 the unit test covering this wrote to
+the real `Run` key and restored only *whether* a value had been there, not what
+it said — putting back `current_exe()`, which under `cargo test` is the test
+harness. Running the suite on a machine with autostart enabled therefore
+repointed the user's autostart at a build artefact, and every subsequent logon
+launched that instead of SuperTile. It was self-perpetuating, since the harness
+runs the test. The test now saves and restores the exact value.
+
+### T11 — Malicious or altered update payload
+
+The in-app updater writes bytes fetched over the network over the running
+executable and then runs them. This is the most consequential thing the program
+does, so it is worth stating plainly rather than burying in a feature list.
+
+**Mitigations.** The feature never acts on its own: a download begins only when
+the user clicks Install. Both URLs are checked against
+`https://github.com/andreaswiren/supertile/` when the release is parsed, before
+anything is fetched, so a release whose asset points elsewhere simply offers no
+Install. The binary is rejected unless it matches the `.sha256` published beside
+it, and it is size-capped so a redirect to something enormous is abandoned
+rather than buffered. The replacement goes in by rename and the previous
+executable is kept until the next start, so a failed write leaves a working
+program. Nothing elevates: where the directory needs permission, one visible
+`cmd` command goes to UAC.
+
+**Residual risk, not mitigated.** The digest is a checksum, not a signature.
+Anyone who can publish a release on this repository can publish a matching
+digest, so the feature's trust root is *control of the GitHub repository* — the
+same root as downloading the file by hand, but exercised without a person
+looking at it. There is no code-signing certificate and no update key. A user
+who does not accept that root should leave update checks off and install
+manually; the feature is off by default.
 
 ### T9 — Screen content exposure through dimming
 

@@ -91,9 +91,28 @@ SuperTile is designed so that:
 - It makes **one kind of network connection, and only when you ask for it**: an
   HTTPS request to `api.github.com` to see whether a newer release exists. It is
   **off by default** and is the only outbound traffic the program can produce.
-  There is no telemetry, no analytics, no crash reporting, and nothing is ever
-  downloaded or installed automatically — the check reads a version number and a
-  URL, and reports them.
+  There is no telemetry, no analytics and no crash reporting, and nothing is
+  ever downloaded or installed *automatically*. The check itself reads a version
+  number and a URL, and reports them.
+
+  Since 0.34.0 the About window can also **download and install** a new release,
+  but only when you click Install. That fetches two files from the release you
+  were shown — `supertile.exe` and the `supertile.exe.sha256` published beside
+  it — and refuses to install unless the binary matches that digest. Both URLs
+  must be under `https://github.com/andreaswiren/supertile/` or they are not
+  fetched at all.
+
+  Be clear about what the digest is worth: it is a checksum, not a signature. It
+  proves the bytes are the ones GitHub served for that release over TLS, and it
+  catches truncation or a corrupting proxy. It is not evidence about who built
+  them — anyone able to publish a release can publish a digest beside it. If
+  that is not a trust boundary you accept, leave update checks off and install
+  by hand.
+
+  Installing never elevates SuperTile. Where the install directory is not
+  writable — `C:\Program Files`, the documented location — the swap is handed to
+  a single `cmd` command that you see and approve in a UAC prompt. SuperTile
+  itself continues to run unelevated.
 
   Anything else leaving `supertile.exe` — any other host, or any traffic at all
   while update checks are disabled — should be reported as a vulnerability.

@@ -70,6 +70,15 @@ const HTTPS_PORT: u16 = 443;
 /// source is GitHub's own API.
 const TRUSTED_URL_PREFIX: &str = "https://github.com/andreaswiren/supertile/";
 
+/// The published binary, and the digest published beside it.
+const ASSET_EXE: &str = "supertile.exe";
+const ASSET_SHA: &str = "supertile.exe.sha256";
+
+/// Ceiling on a downloaded binary. The real one is around a megabyte; this is
+/// loose enough not to need revising every release and tight enough that a
+/// redirect to something enormous is refused rather than buffered.
+const MAX_DOWNLOAD_BYTES: usize = 32 * 1024 * 1024;
+
 /// Timeouts in milliseconds. Generous, because a slow hotel network is not a
 /// failure, but finite, because the calling thread is waiting on this and a
 /// check that never returns is a leaked thread.
@@ -86,6 +95,9 @@ const MAX_BODY_BYTES: usize = 512 * 1024;
 /// Size of each `WinHttpReadData` chunk.
 const READ_CHUNK_BYTES: usize = 16 * 1024;
 
+/// A megabyte over a slow link takes longer than a version check does.
+const DOWNLOAD_RECEIVE_TIMEOUT_MS: i32 = 120_000;
+
 /// Release notes are shown in a dialog, not archived, so they are clipped.
 const MAX_NOTES_CHARS: usize = 2000;
 
@@ -99,6 +111,11 @@ pub enum Outcome {
         version: String,
         url: String,
         notes: String,
+        /// Direct download for the published binary, when the release has one.
+        exe_url: Option<String>,
+        /// Its `.sha256` companion. Without it nothing is installed: an
+        /// executable is not run on the strength of having arrived.
+        sha_url: Option<String>,
     },
     /// The check did not complete. The string is one short sentence fit to show
     /// a user, or to drop in the log and otherwise ignore.
@@ -111,6 +128,8 @@ struct Release {
     version: String,
     url: String,
     notes: String,
+    exe_url: Option<String>,
+    sha_url: Option<String>,
 }
 
 /// Fetch the latest release. Blocking; call it off the UI thread.
@@ -132,6 +151,8 @@ pub fn check_latest() -> Outcome {
             version: release.version,
             url: release.url,
             notes: release.notes,
+            exe_url: release.exe_url,
+            sha_url: release.sha_url,
         }
     } else {
         Outcome::UpToDate
@@ -263,10 +284,30 @@ fn parse_release(body: &str) -> Result<Release, String> {
         .map(|b| clamp_notes(b.trim()))
         .unwrap_or_default();
 
+    // Asset URLs, held to the same rule as the release page: on this
+    // repository or not at all. One of them names a file that will be written
+    // over the running executable, so where it came from is the whole of the
+    // security argument.
+    let asset = |want: &str| -> Option<String> {
+        value
+            .get("assets")?
+            .as_array()?
+            .iter()
+            .find(|a| a.get("name").and_then(serde_json::Value::as_str) == Some(want))?
+            .get("browser_download_url")?
+            .as_str()
+            .filter(|u| u.starts_with(TRUSTED_URL_PREFIX))
+            .map(str::to_string)
+    };
+    let exe_url = asset(ASSET_EXE);
+    let sha_url = asset(ASSET_SHA);
+
     Ok(Release {
         version,
         url,
         notes,
+        exe_url,
+        sha_url,
     })
 }
 
@@ -689,5 +730,342 @@ mod tests {
     fn an_absurd_interval_does_not_overflow() {
         assert!(!due(1, 1_755_000_000, u64::MAX));
         assert!(due(1, 1_755_000_000, 0));
+    }
+}
+
+// ============================================================== downloading ==
+//
+// Fetching and installing a new binary, which is a different risk from asking
+// what the latest version is. The rules this code keeps to:
+//
+//   * **Only this repository.** Both URLs are checked against
+//     `TRUSTED_URL_PREFIX` when the release is parsed, before anything is
+//     fetched. A redirect is followed (GitHub serves release assets from a CDN)
+//     but the URL that starts it is ours.
+//   * **The digest decides.** The `.sha256` published beside the binary must be
+//     present and must match, or nothing is written. A release without one
+//     cannot be installed from inside the program.
+//   * **No elevation is taken.** Where the running copy lives in a directory
+//     the user cannot write -- `C:\Program Files`, the documented install
+//     location -- the swap is handed to a single elevated command that the user
+//     sees and approves. SuperTile itself stays unelevated.
+//
+// What the digest does and does not buy: it is a checksum, not a signature. It
+// proves the bytes are the bytes GitHub published on the release page, over
+// TLS, and catches truncation or a corrupted proxy. It is not evidence about
+// who built them. Anyone who can publish a release can publish a digest for it.
+
+/// Where a downloaded binary went, and what installing it will take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Install {
+    /// Swapped in place. The caller should restart into it.
+    Replaced,
+    /// The install directory is not writable by this user. The new binary is
+    /// waiting at this path; installing it means an elevated copy.
+    NeedsElevation(std::path::PathBuf),
+}
+
+/// Download the published binary and check it against its digest.
+///
+/// Blocking, and slow enough to matter: call it off the UI thread. Returns the
+/// path of a verified file in the temporary directory, which the caller either
+/// installs or deletes.
+pub fn download_verified(exe_url: &str, sha_url: &str) -> Result<std::path::PathBuf, String> {
+    if !exe_url.starts_with(TRUSTED_URL_PREFIX) || !sha_url.starts_with(TRUSTED_URL_PREFIX) {
+        return Err("that download is not on the SuperTile repository".to_string());
+    }
+
+    let sha_bytes = http_get(sha_url, 1024)?;
+    let expected = String::from_utf8(sha_bytes)
+        .map_err(|_| "the published digest was not text".to_string())?
+        // The file is `<hex>  supertile.exe`, as sha256sum writes it.
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("the published digest was not a SHA-256".to_string());
+    }
+
+    let exe = http_get(exe_url, MAX_DOWNLOAD_BYTES)?;
+    if exe.is_empty() {
+        return Err("the download was empty".to_string());
+    }
+    let got = sha256_hex(&exe).ok_or_else(|| "could not hash the download".to_string())?;
+    if got != expected {
+        return Err("the download did not match its published digest".to_string());
+    }
+
+    let mut path = std::env::temp_dir();
+    path.push(format!("supertile-{}.exe.new", std::process::id()));
+    std::fs::write(&path, &exe).map_err(|e| format!("could not save the download: {e}"))?;
+    Ok(path)
+}
+
+/// Put `new_exe` where the running executable is.
+///
+/// A running executable cannot be overwritten, but it *can* be renamed, so the
+/// current one is moved aside first and the replacement takes its name. The
+/// leftover is removed on the next start.
+pub fn install(new_exe: &std::path::Path) -> Result<Install, String> {
+    let target = std::env::current_exe().map_err(|e| format!("cannot locate myself: {e}"))?;
+    let backup = target.with_extension("exe.old");
+
+    let _ = std::fs::remove_file(&backup);
+    if std::fs::rename(&target, &backup).is_err() {
+        // Almost always a read-only install directory rather than anything
+        // exotic. Say what it is and let the caller offer the elevated path.
+        return Ok(Install::NeedsElevation(new_exe.to_path_buf()));
+    }
+    if let Err(e) = std::fs::copy(new_exe, &target) {
+        // Put the working copy back before reporting: a failure here must not
+        // leave the user with no executable at all.
+        let _ = std::fs::rename(&backup, &target);
+        return Err(format!("could not write the new version: {e}"));
+    }
+    let _ = std::fs::remove_file(new_exe);
+    Ok(Install::Replaced)
+}
+
+/// Delete the `.old` file a previous update left behind. Cheap; ignore failure.
+pub fn clean_previous() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(exe.with_extension("exe.old"));
+    }
+}
+
+/// SHA-256 of `data`, lowercase hex, via the OS. No new dependency.
+fn sha256_hex(data: &[u8]) -> Option<String> {
+    use windows::Win32::Security::Cryptography::{BCryptHash, BCRYPT_SHA256_ALG_HANDLE};
+    let mut out = [0u8; 32];
+    // SAFETY: the pseudo-handle names SHA-256 and needs no provider to be
+    // opened or closed; there is no secret, so that slice is empty; `data` and
+    // `out` are live for the call and `out` is exactly the digest length.
+    let status = unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, data, &mut out) };
+    status.is_ok().then(|| {
+        out.iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .concat()
+    })
+}
+
+/// One HTTPS GET, following redirects, capped at `max_bytes`.
+///
+/// Separate from `fetch_latest_release` because that one is pinned to the API
+/// host and path and sends API headers. This takes a whole URL, because a
+/// release asset lives on `github.com` and redirects to a CDN host that is not
+/// known in advance.
+fn http_get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let (host, path) = split_https(url).ok_or_else(|| "malformed download URL".to_string())?;
+
+    let agent = WideStr::new(&format!("supertile/{}", crate::APP_VERSION));
+    // SAFETY: as in `fetch_latest_release` -- `agent` outlives the call, the
+    // proxy arguments must be null for the automatic access type, and no flags
+    // means synchronous mode.
+    let session = WinHttpHandle(unsafe {
+        WinHttpOpen(
+            agent.as_pcwstr(),
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            0,
+        )
+    });
+    if session.raw().is_null() {
+        return Err(format!(
+            "could not start the download: {}",
+            last_error_message()
+        ));
+    }
+    // A download is bigger than a version check, so it gets longer to finish.
+    // SAFETY: live session handle; the timeouts are milliseconds.
+    unsafe {
+        WinHttpSetTimeouts(
+            session.raw(),
+            RESOLVE_TIMEOUT_MS,
+            CONNECT_TIMEOUT_MS,
+            SEND_TIMEOUT_MS,
+            DOWNLOAD_RECEIVE_TIMEOUT_MS,
+        )
+    }
+    .map_err(|_| "could not set a timeout on the download".to_string())?;
+
+    let host_w = WideStr::new(&host);
+    // SAFETY: live session handle; `host_w` outlives the call; reserved is zero.
+    let connect =
+        WinHttpHandle(unsafe { WinHttpConnect(session.raw(), host_w.as_pcwstr(), HTTPS_PORT, 0) });
+    if connect.raw().is_null() {
+        return Err(last_error_message());
+    }
+
+    let verb = WideStr::new("GET");
+    let path_w = WideStr::new(&path);
+    // SAFETY: live connection handle; `verb` and `path_w` outlive the call; the
+    // version, referrer and accept-types arguments are the documented nulls;
+    // WINHTTP_FLAG_SECURE selects TLS.
+    let request = WinHttpHandle(unsafe {
+        WinHttpOpenRequest(
+            connect.raw(),
+            verb.as_pcwstr(),
+            path_w.as_pcwstr(),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            std::ptr::null(),
+            WINHTTP_FLAG_SECURE,
+        )
+    });
+    if request.raw().is_null() {
+        return Err(last_error_message());
+    }
+
+    // SAFETY: live request handle; no body, so the data pointer is None and
+    // both lengths are zero; no context is needed in synchronous mode.
+    unsafe { WinHttpSendRequest(request.raw(), None, None, 0, 0, 0) }
+        .map_err(|_| last_error_message())?;
+    // SAFETY: the request has been sent, which is the precondition; reserved
+    // must be null.
+    unsafe { WinHttpReceiveResponse(request.raw(), std::ptr::null_mut()) }
+        .map_err(|_| last_error_message())?;
+
+    match query_status_code(&request)? {
+        200 => {}
+        404 => return Err("that release file is no longer published".to_string()),
+        other => return Err(format!("GitHub answered {other}")),
+    }
+    read_body_capped(&request, max_bytes)
+}
+
+/// Split `https://host/path` into its two halves.
+///
+/// Deliberately not a general URL parser: anything with credentials, a port or
+/// a non-HTTPS scheme is refused rather than interpreted, because every URL
+/// reaching here has already been checked to start with the project's own
+/// `https://github.com/...` prefix and a redirect target that looks unusual is
+/// a reason to stop, not to be clever.
+fn split_https(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("https://")?;
+    let (host, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    if host.is_empty() || host.contains('@') || host.contains(':') {
+        return None;
+    }
+    Some((host.to_string(), path.to_string()))
+}
+
+/// Read a response body, refusing anything over `max_bytes`.
+fn read_body_capped(request: &WinHttpHandle, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; READ_CHUNK_BYTES];
+    loop {
+        let mut read: u32 = 0;
+        // SAFETY: `chunk` is a live buffer of the length passed, and `read` is
+        // a valid out-param. A zero read means the body is complete.
+        unsafe {
+            WinHttpReadData(
+                request.raw(),
+                chunk.as_mut_ptr() as *mut core::ffi::c_void,
+                chunk.len() as u32,
+                &mut read,
+            )
+        }
+        .map_err(|_| last_error_message())?;
+        if read == 0 {
+            return Ok(out);
+        }
+        if out.len() + read as usize > max_bytes {
+            return Err("the download was larger than expected and was abandoned".to_string());
+        }
+        out.extend_from_slice(&chunk[..read as usize]);
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+
+    /// Against the published SHA-256 vectors. If this is wrong, every download
+    /// is either rejected or -- far worse -- accepted on a hash nobody checked.
+    #[test]
+    fn sha256_matches_the_known_vectors() {
+        assert_eq!(
+            sha256_hex(b"abc").unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b"").unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn a_url_splits_into_host_and_path() {
+        assert_eq!(
+            split_https("https://github.com/andreaswiren/supertile/releases/download/v1/x.exe"),
+            Some((
+                "github.com".to_string(),
+                "/andreaswiren/supertile/releases/download/v1/x.exe".to_string()
+            ))
+        );
+        // A bare host still has a path.
+        assert_eq!(
+            split_https("https://example.com"),
+            Some(("example.com".to_string(), "/".to_string()))
+        );
+    }
+
+    /// Anything unusual is refused rather than interpreted.
+    #[test]
+    fn odd_urls_are_refused() {
+        for bad in [
+            "http://github.com/x",       // not TLS
+            "https://user@github.com/x", // credentials
+            "https://github.com:8443/x", // a port
+            "ftp://github.com/x",        // not even http
+            "github.com/x",              // no scheme
+            "https:///x",                // no host
+        ] {
+            assert_eq!(split_https(bad), None, "{bad} should be refused");
+        }
+    }
+
+    /// Assets are read from the release, and only from this repository.
+    #[test]
+    fn assets_are_taken_only_from_our_own_repository() {
+        let body = r#"{
+            "tag_name": "v9.9.9",
+            "html_url": "https://github.com/andreaswiren/supertile/releases/tag/v9.9.9",
+            "body": "notes",
+            "assets": [
+              {"name": "supertile.exe",
+               "browser_download_url": "https://github.com/andreaswiren/supertile/releases/download/v9.9.9/supertile.exe"},
+              {"name": "supertile.exe.sha256",
+               "browser_download_url": "https://github.com/andreaswiren/supertile/releases/download/v9.9.9/supertile.exe.sha256"}
+            ]
+        }"#;
+        let r = parse_release(body).unwrap();
+        assert!(r.exe_url.unwrap().ends_with("/supertile.exe"));
+        assert!(r.sha_url.unwrap().ends_with("/supertile.exe.sha256"));
+
+        // The same release, with the binary pointed somewhere else entirely.
+        let hostile = body.replace(
+            "https://github.com/andreaswiren/supertile/releases/download/v9.9.9/supertile.exe\"",
+            "https://example.invalid/supertile.exe\"",
+        );
+        let r = parse_release(&hostile).unwrap();
+        assert_eq!(r.exe_url, None, "an off-repository binary is not offered");
+    }
+
+    /// A release with no digest published cannot be installed.
+    #[test]
+    fn a_download_without_a_digest_is_refused() {
+        let err = download_verified(
+            "https://github.com/andreaswiren/supertile/releases/download/v1/supertile.exe",
+            "https://example.invalid/supertile.exe.sha256",
+        )
+        .unwrap_err();
+        assert!(err.contains("not on the SuperTile repository"), "{err}");
     }
 }

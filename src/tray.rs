@@ -1281,7 +1281,16 @@ impl Tray {
             );
 
             self.submenu(menu, settings_menu, "Settings", GLYPH_SETTINGS);
-            self.item(menu, ID_ABOUT, "About & SBOM…", GLYPH_ABOUT, false);
+            self.item(menu, ID_ABOUT, "About…", GLYPH_ABOUT, false);
+
+            // The version, as plain unclickable text.
+            //
+            // Which build is running is the first thing any bug report needs
+            // and the first thing anyone checks after an update. Putting it
+            // behind the About window meant opening a window to answer a
+            // question that fits in one line of the menu.
+            let version = crate::util::WideStr::new(&format!("Version {}", crate::APP_VERSION));
+            let _ = AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, version.as_pcwstr());
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             self.action_item(
                 menu,

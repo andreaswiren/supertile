@@ -44,6 +44,10 @@ fn main() {
         return;
     };
 
+    // Remove the previous executable an update left beside this one. It can
+    // only be deleted once it is no longer running, which is now.
+    supertile::update::clean_previous();
+
     let Some(app) = app::App::new() else {
         notify(
             "SuperTile could not start",
