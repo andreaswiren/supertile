@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSI packaging for SuperTile.
+
+  The installer elevates; the application does not. That distinction is the
+  whole reason this file exists. Copying a binary into `C:\Program Files`
+  requires administrator rights once, at install time, and Windows Installer is
+  the ordinary way to ask for them. SuperTile itself continues to run as the
+  logged-in user with no elevation, as `docs/compliance/threat-model.md` (T7)
+  describes.
+
+  What this package deliberately does NOT do:
+
+  * It does not write the autostart entry. That lives in HKCU and belongs
+    to whoever is logged in, not to a per-machine install; the application
+    writes and removes it from its own Settings menu. An installer running as
+    an administrator would write it into the *administrator's* hive, which is
+    the wrong user on any machine where those differ.
+  * It does not touch the configuration. %LOCALAPPDATA%\SuperTile survives
+    uninstall. Removing a program should not throw away how it was set up, and
+    anyone who wants it gone can delete one folder.
+  * It installs no service, no driver and no scheduled task.
+
+  The install directory matches the path the README has always documented for a
+  manual install, so this package overlays an existing hand-copied install
+  rather than producing a second one beside it, and an autostart entry written
+  by that earlier install keeps working.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <?define ProductName = "SuperTile" ?>
+  <?define Manufacturer = "Andreas Wiren" ?>
+
+  <Package
+      Name="$(ProductName)"
+      Manufacturer="$(Manufacturer)"
+      Version="$(Version)"
+      UpgradeCode="7a1d6f02-4b3e-5c8a-9d21-3f6b8c4e7a90"
+      Scope="perMachine"
+      Compressed="yes"
+      InstallerVersion="500">
+
+    <!-- One cabinet inside the MSI: a single file to download and to verify. -->
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Upgrading replaces; it never leaves two entries in Apps & features.
+         Scheduled after InstallExecute so the old files go once the new ones
+         are known good. -->
+    <MajorUpgrade
+        Schedule="afterInstallExecute"
+        DowngradeErrorMessage="A newer version of [ProductName] is already installed. Uninstall it first if you really mean to go back." />
+
+    <!-- Close a running copy rather than demanding a reboot.
+         SuperTile's host window exits cleanly on WM_CLOSE, releasing its tray
+         icon, hotkeys and WinEvent hook. Without this the file is locked and
+         Windows Installer asks the user to restart the machine, which for a
+         tray utility is an absurd price. -->
+    <util:CloseApplication
+        Id="CloseSuperTile"
+        Target="supertile.exe"
+        CloseMessage="yes"
+        RebootPrompt="no"
+        Timeout="10" />
+
+    <!-- Apps & features -->
+    <Icon Id="SuperTileIcon" SourceFile="$(IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="SuperTileIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/andreaswiren/supertile" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <!-- Apps & features shows a blank install location without this: the
+         property has to be set once the directory table has been costed, and
+         nothing populates it by default. -->
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" After="CostFinalize" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <!-- Lowercase, matching the documented manual-install path exactly. -->
+      <Directory Id="INSTALLFOLDER" Name="supertile" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Feature Id="Main" Title="$(ProductName)" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+
+    <ComponentGroup Id="ProductComponents">
+      <Component Directory="INSTALLFOLDER" Guid="3c9e5b14-8a72-5d46-b0f3-1e7c9a2d4b68">
+        <File Id="SuperTileExe" Source="$(ExePath)" Name="supertile.exe" KeyPath="yes">
+          <Shortcut
+              Id="StartMenuShortcut"
+              Directory="ProgramMenuFolder"
+              Name="$(ProductName)"
+              Description="Fullscreen autotiling window manager for Windows 11"
+              Icon="SuperTileIcon"
+              Advertise="yes" />
+        </File>
+      </Component>
+
+      <!-- The SBOM ships beside the binary.
+           An SBOM nobody can find is not much of an SBOM, and "it is embedded
+           in the executable" is a poor answer to an auditor holding an MSI. -->
+      <Component Directory="INSTALLFOLDER" Guid="5f2a7c60-9d18-52b4-8e37-6a1b4c8d2e95">
+        <File Id="SuperTileSbom" Source="$(SbomPath)" Name="supertile.cdx.json" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Package>
+</Wix>

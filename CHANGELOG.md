@@ -18,6 +18,38 @@ for the disclosure policy.
 
 Nothing yet.
 
+## [0.35.0] - 2026-09-25
+
+### Added
+
+- **An MSI installer.** `supertile.msi` is published beside the executable and
+  is the same build: it installs to `C:\Program Files\supertile`, adds a
+  Start-menu entry and an uninstaller, and upgrades a previous version in place
+  instead of leaving two entries in Apps & features. The loose `.exe` stays, so
+  this is a second option rather than a replacement.
+
+  It needs administrator rights once, at install time, because Program Files
+  requires them. Nothing else changes: SuperTile still runs unelevated.
+
+  What the installer deliberately does not do:
+
+  - **It does not write the autostart entry.** That value lives in `HKCU`, and
+    an installer elevated to administrator would write it into the
+    administrator's hive rather than the logged-in user's. The app continues to
+    write and remove it from its own Settings menu.
+  - **It does not remove your configuration on uninstall.**
+    `%LOCALAPPDATA%\SuperTile` is left alone.
+  - **It installs no service, driver or scheduled task.**
+
+  A running copy is closed with `WM_CLOSE` before the files are replaced, so an
+  upgrade does not end in Windows Installer asking to reboot — which for a tray
+  utility would be an absurd price. The MSI also carries the CycloneDX SBOM next
+  to the binary, since "it is embedded in the executable" is a poor answer to
+  someone holding an installer.
+
+  Both the MSI and the executable remain **unsigned**; each is published with a
+  `.sha256` beside it.
+
 ## [0.34.0] - 2026-09-23
 
 ### Fixed

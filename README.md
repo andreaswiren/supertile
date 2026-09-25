@@ -111,27 +111,48 @@ C++ was the closest runner-up, rejected on point 3.
 
 ## Install
 
-There is no installer. Download `supertile.exe` from
-[Releases](https://github.com/andreaswiren/supertile/releases) and put it
-somewhere it will not be deleted by accident — the suggested home is a folder of
-its own under Program Files:
+Two ways, both the same build, from
+[Releases](https://github.com/andreaswiren/supertile/releases).
 
+**`supertile.msi`** — the ordinary route. It installs to
+`C:\Program Files\supertile`, adds a Start-menu entry and an uninstaller, and
+upgrades a previous version in place rather than leaving two behind.
+
+```powershell
+msiexec /i supertile.msi          # or just double-click it
+msiexec /i supertile.msi /quiet   # unattended
 ```
-C:\Program Files\SuperTile\supertile.exe
-```
 
-Creating that folder needs an administrator prompt, because Program Files is
-protected. That is the only elevation involved anywhere: **SuperTile itself runs
-unelevated**, and deliberately so — see
-[Windows that run as administrator](#windows-that-run-as-administrator). If you
-would rather avoid the prompt entirely, anywhere writable works just as well;
-`%LOCALAPPDATA%\Programs\SuperTile\` is the usual choice.
+**`supertile.exe`** — the bare binary, if you would rather not install
+anything. Put it anywhere that will not be cleared out by accident and run it.
+`%LOCALAPPDATA%\Programs\SuperTile\` needs no permission at all; a folder under
+Program Files is tidier but you have to create it with an administrator prompt.
 
-Run the executable and it appears in the system tray. Nothing else is required.
+Either way it appears in the system tray, and nothing else is required.
 
-> Releases are **not yet Authenticode-signed**, so SmartScreen will warn on
-> first run. Verify the SHA-256 against the release page. Tracked in
-> [TODO.md](TODO.md) as a 1.0 blocker.
+### About that administrator prompt
+
+The MSI needs administrator rights **once**, at install time, because writing to
+Program Files requires them. That is the only elevation anywhere in the project:
+**SuperTile itself runs unelevated**, deliberately, and the installer does not
+change that — see
+[Windows that run as administrator](#windows-that-run-as-administrator).
+
+The installer is also deliberately incurious. It does not write the autostart
+entry, because that belongs to `HKCU` and an installer running as an
+administrator would write it into the *administrator's* hive rather than yours;
+the app writes it from its own Settings menu instead. It does not install a
+service, a driver or a scheduled task. And uninstalling leaves
+`%LOCALAPPDATA%\SuperTile` alone, so your configuration survives.
+
+> If you update from inside the app (**About → Install…**), the new binary
+> replaces the installed one but Windows Installer does not know it happened.
+> Uninstalling still removes it; choosing *Repair* in Apps & features would put
+> the MSI's original version back.
+
+> Releases are **not yet Authenticode-signed** — neither the executable nor the
+> MSI — so SmartScreen will warn on first run. Verify the download against the
+> `.sha256` published beside it. Tracked in [TODO.md](TODO.md) as a 1.0 blocker.
 
 ### What it writes
 

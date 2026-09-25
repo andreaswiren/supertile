@@ -74,6 +74,30 @@ jobs:
             Set-Content dist/supertile.exe.sha256 -Encoding ascii
           Get-Content dist/supertile.exe.sha256
 
+      # An MSI for people who would rather their software arrived the ordinary
+      # way: in Apps & features, with an uninstaller, upgrading in place. The
+      # loose .exe stays -- it is still the smaller, no-commitment option -- so
+      # this adds a choice rather than replacing one.
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.Util.wixext/5.0.2
+          # Windows Installer compares three-part versions only, and the tag is
+          # already checked against Cargo.toml by the step above.
+          $v = '${{ github.event.inputs.tag || github.ref_name }}' -replace '^v',''
+          wix build -arch x64 `
+            -d Version=$v `
+            -d ExePath=$PWD/dist/supertile.exe `
+            -d SbomPath=$PWD/dist/supertile.cdx.json `
+            -d IconPath=$PWD/assets/icons/supertile.ico `
+            -ext WixToolset.Util.wixext `
+            -o dist/supertile.msi packaging/supertile.wxs
+          $h = Get-FileHash dist/supertile.msi -Algorithm SHA256
+          "$($h.Hash.ToLower())  supertile.msi" |
+            Set-Content dist/supertile.msi.sha256 -Encoding ascii
+          Get-Content dist/supertile.msi.sha256
+
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
@@ -81,22 +105,36 @@ jobs:
           files: |
             dist/supertile.exe
             dist/supertile.exe.sha256
+            dist/supertile.msi
+            dist/supertile.msi.sha256
             dist/supertile.cdx.json
           body: |
-            Download `supertile.exe` and run it — no installer, no dependencies.
-            It lives in the system tray.
+            Two ways to install, both the same build.
+
+            * **`supertile.msi`** — installs to `C:\Program Files\supertile`,
+              adds a Start-menu entry and an uninstaller, and upgrades a
+              previous version in place. Needs administrator rights *once*, to
+              write to Program Files. SuperTile itself then runs unelevated.
+            * **`supertile.exe`** — the bare binary. Put it anywhere and run it;
+              no installer, no dependencies. It lives in the system tray.
+
+            Neither one starts with Windows until you switch that on in
+            Settings, and neither writes anything outside
+            `%LOCALAPPDATA%\SuperTile` unless you do.
 
             **These builds are not code-signed**, so SmartScreen will warn on
-            first run. Verify the download against `supertile.exe.sha256`
-            before trusting it:
+            first run. Verify a download against its `.sha256` before trusting
+            it:
 
             ```powershell
             Get-FileHash supertile.exe -Algorithm SHA256
+            Get-FileHash supertile.msi -Algorithm SHA256
             ```
 
             `supertile.cdx.json` is the CycloneDX software bill of materials for
             this exact build, as required under the EU Cyber Resilience Act. The
-            same document is readable in the app under **About & SBOM**.
+            same document is readable in the app under **About**, and the MSI
+            installs a copy beside the binary.
 
             See [CHANGELOG.md](https://github.com/andreaswiren/supertile/blob/main/CHANGELOG.md)
             for what changed in this version.
